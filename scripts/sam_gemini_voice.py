@@ -37,22 +37,30 @@ from PIL import Image
 # Load environment variables from .env file if it exists
 def load_env_file():
     """Load environment variables from .env file."""
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                # Skip comments and empty lines
-                if not line or line.startswith('#'):
-                    continue
-                # Parse KEY=VALUE format
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    # Only set if not already in environment
-                    if key and value and key not in os.environ:
-                        os.environ[key] = value
+    # Check multiple locations for .env file
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_paths = [
+        os.path.join(script_dir, '.env'),  # scripts/.env
+        os.path.join(script_dir, '..', '.env'),  # root/.env
+    ]
+    
+    for env_path in possible_paths:
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    # Parse KEY=VALUE format
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"').strip("'")
+                        # Only set if not already in environment
+                        if key and value and key not in os.environ:
+                            os.environ[key] = value
+            break  # Stop after finding first .env file
 
 # Load .env file before anything else
 load_env_file()
@@ -85,12 +93,12 @@ class GeminiAgent:
         self.scene_context = {}  # Continuous scene context
         
         # ==========================================
-        # GEMINI API RATE LIMITING
+        # GEMINI API RATE LIMITING (Conservative for free tier)
         # ==========================================
         self.vision_call_count = 0
         self.last_vision_call = 0
-        self.min_vision_interval = 2.0  # Minimum 2 seconds between vision API calls
-        self.max_vision_calls_per_minute = 10  # Limit vision calls per minute
+        self.min_vision_interval = 6.0  # Minimum 6 seconds between vision API calls
+        self.max_vision_calls_per_minute = 5  # Limit vision calls per minute (free tier safe)
         self.vision_calls_this_minute = 0
         self.minute_start = time.time()
         
@@ -102,7 +110,7 @@ class GeminiAgent:
         self.confidence_adjustments = {}  # Store confidence adjustments (label -> multiplier)
         self.optimization_history = []  # Track optimizations over time
         self.last_feedback_update = 0
-        self.feedback_interval = 3.0  # Update feedback every 3 seconds (reduced from 0.5s)
+        self.feedback_interval = 10.0  # Update feedback every 10 seconds (conservative for free tier)
         
         # Detection quality metrics
         self.detection_accuracy = {}  # Track accuracy per object type
@@ -195,17 +203,17 @@ class GeminiAgent:
         self.last_vision_call = time.time()
     
     def label_all_segments(self, frame, masks_with_centers):
-        """Use Gemini Vision to label ALL SAM segments - OPEN VOCABULARY detection."""
+        """Use Gemini Vision to label ALL SAM segments - ENHANCED OPEN VOCABULARY detection with asset class integration."""
         if not self.available or not self._can_call_vision():
             return None
-        
+
         try:
             # Convert frame to PIL Image
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb)
-            pil_image.thumbnail((512, 384))  # Smaller for faster processing
-            
-            # Build position descriptions
+            pil_image.thumbnail((640, 480))  # Higher resolution for better identification
+
+            # Build position descriptions with more context
             positions = []
             for idx, (mask, existing_label, center) in enumerate(masks_with_centers):
                 if center and center[0] > 0:
@@ -216,26 +224,51 @@ class GeminiAgent:
                     # Include existing meaningful labels as hints
                     hint = f" (detected: {existing_label})" if existing_label and not existing_label.startswith("~") else ""
                     positions.append(f"{idx+1}: {v} {h}{hint}")
-            
-            prompt = f"""Look at this image carefully. Name each numbered region with a simple, specific label.
+
+            prompt = f"""You are an EXPERT object identification system. Analyze this image carefully and identify EVERY numbered region with PRECISE, SPECIFIC labels.
 
 Regions to label:
-{chr(10).join(positions[:15])}
+{chr(10).join(positions[:20])}
 
-LABEL EXAMPLES:
-- Large background areas: "wall", "ceiling", "floor", "background"  
-- Person parts: "face", "hand", "arm", "body", "head"
-- Furniture: "chair", "desk", "table", "shelf", "cabinet"
-- Objects: "monitor", "lamp", "door", "window", "plant", "clock"
-- If unsure: "object" or describe what you see
+CRITICAL REQUIREMENTS:
+1. Be SPECIFIC - Use exact object names, not generic terms
+2. Identify ASSET CLASSES - Categorize objects for proper labeling
+3. Include FUNCTIONAL attributes (e.g., "ceiling_light", "table_lamp", "desk_monitor")
 
-Return ONLY this JSON format:
-[{{"region":1,"label":"wall"}},{{"region":2,"label":"face"}}]"""
+ASSET CATEGORIES & EXAMPLES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LIGHTING:
+- "ceiling_light", "table_lamp", "floor_lamp", "led_strip", "desk_light"
+- "window" (natural light source), "skylight", "light_fixture"
+
+SCREENS:
+- "laptop_screen", "desktop_monitor", "tv_screen", "tablet", "phone_screen"
+- "projector_screen", "smart_display"
+
+PERSON/BODY:
+- "face", "left_hand", "right_hand", "left_arm", "right_arm", "torso", "head"
+- "person", "body"
+
+FURNITURE:
+- "desk", "chair", "table", "shelf", "cabinet", "bed", "couch", "bookshelf"
+- "drawer", "wardrobe"
+
+STRUCTURAL:
+- "wall", "ceiling", "floor", "door", "window_frame", "column", "corner"
+
+OBJECTS:
+- "plant", "clock", "picture_frame", "poster", "book", "keyboard", "mouse"
+- "speaker", "headphones", "cup", "bottle", "bag"
+
+Return ONLY this JSON format with SPECIFIC labels:
+[{{"region":1,"label":"ceiling_light","asset_class":"lighting"}},
+ {{"region":2,"label":"laptop_screen","asset_class":"screen"}},
+ {{"region":3,"label":"desk","asset_class":"furniture"}}]"""
 
             self._record_vision_call()
             response = self.vision_model.generate_content([prompt, pil_image])
             text = response.text.strip()
-            
+
             # Extract JSON from response
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0]
@@ -246,23 +279,33 @@ Return ONLY this JSON format:
                 start = text.find("[")
                 end = text.rfind("]") + 1
                 text = text[start:end]
-            
+
             results = json.loads(text)
-            
-            # Convert to dict: region_index -> label
+
+            # Convert to dict: region_index -> (label, asset_class)
             labels = {}
             label_list = []
+            asset_classes = {}
+
             for item in results:
                 region = item.get("region", 0) - 1  # Convert to 0-indexed
                 label = item.get("label", "unknown").lower().strip()
+                asset_class = item.get("asset_class", "object").lower().strip()
+
                 if 0 <= region < len(masks_with_centers) and label:
                     labels[region] = label
-                    label_list.append(label)
-            
+                    asset_classes[region] = asset_class
+                    label_list.append(f"{label}[{asset_class}]")
+
+            # Store asset classes for semantic understanding
+            if not hasattr(self, 'asset_class_map'):
+                self.asset_class_map = {}
+            self.asset_class_map.update({labels[i]: asset_classes.get(i, "object") for i in labels.keys()})
+
             if label_list:
-                print(f"  🏷️ Gemini: {', '.join(label_list[:8])}{'...' if len(label_list) > 8 else ''}")
+                print(f"  🏷️ Gemini Vision ID: {', '.join(label_list[:6])}{'...' if len(label_list) > 6 else ''}")
             return labels
-            
+
         except json.JSONDecodeError as e:
             print(f"  ⚠️ Gemini JSON parse error - using smart fallback")
             return self._smart_fallback_labels(masks_with_centers, frame)
@@ -812,6 +855,111 @@ Return comprehensive JSON:
             'sam_confidence': self.optimal_sam_conf,
             'iou_threshold': self.optimal_iou_threshold
         }
+
+    def process_environmental_command(self, command, mask_labels, mask_centers):
+        """Process dynamic environmental commands using LLM semantic understanding.
+
+        Examples:
+        - "Hey vibe, the lighting is extremely bright" → dim all lights, screens, windows
+        - "It's too dark in here" → brighten the environment
+        - "Too much visual noise" → blur distracting elements
+        """
+        if not self.available:
+            return []
+
+        try:
+            # Get asset class mapping
+            asset_map = getattr(self, 'asset_class_map', {})
+
+            # Build context about available objects
+            available_context = []
+            for i, label in enumerate(mask_labels):
+                asset_class = asset_map.get(label, "object")
+                pos_info = ""
+                if i < len(mask_centers) and mask_centers[i]:
+                    cx, cy = mask_centers[i]
+                    pos_info = f" at ({cx:.0f},{cy:.0f})"
+                available_context.append(f"- {label} [{asset_class}]{pos_info}")
+
+            context_str = "\n".join(available_context)
+
+            prompt = f"""You are an ACCESSIBILITY AI analyzing an environmental sensory request.
+
+USER REQUEST: "{command}"
+
+AVAILABLE OBJECTS IN SCENE:
+{context_str}
+
+TASK: Determine which objects should be affected based on the environmental condition described.
+
+EXAMPLES OF SEMANTIC UNDERSTANDING:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. "lighting is extremely bright" / "lights hurt" / "too much glare"
+   → Affect ALL: lighting sources (ceiling_light, lamp, window, etc.)
+   → Affect ALL: screens (monitor, laptop_screen, tv_screen)
+   → Action: brightness=0.2-0.4 (darken significantly)
+
+2. "too dark" / "can't see"
+   → Affect ALL: lighting sources
+   → Action: brightness=1.5-2.0 (brighten)
+
+3. "too much visual noise" / "overstimulating" / "distracting"
+   → Affect: screens, moving objects, bright objects
+   → Action: blur=true, blur_strength=25-35
+
+4. "screen glare" / "monitor too bright"
+   → Affect: screens only (asset_class=screen)
+   → Action: brightness=0.3
+
+5. "everything is too colorful" / "saturated"
+   → Affect: ALL objects
+   → Action: saturation=0.3-0.5
+
+RETURN FORMAT - JSON array of affected objects:
+[
+  {{"target_label": "ceiling_light", "brightness": 0.3, "reason": "lighting source"}},
+  {{"target_label": "window", "brightness": 0.3, "reason": "natural light source"}},
+  {{"target_label": "laptop_screen", "brightness": 0.3, "reason": "artificial light source"}}
+]
+
+CRITICAL RULES:
+1. Match objects by ASSET CLASS when environmental condition mentioned
+2. Return SPECIFIC labels from the available objects list
+3. Include ALL relevant objects (use asset_class to find them)
+4. Choose appropriate effects (brightness, blur, saturation, contrast)
+5. If request is specific to one object, only affect that object"""
+
+            response = self.text_model.generate_content(prompt)
+            text = response.text.strip()
+
+            # Extract JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+
+            if "[" in text and "]" in text:
+                start = text.find("[")
+                end = text.rfind("]") + 1
+                text = text[start:end]
+
+            results = json.loads(text)
+
+            if isinstance(results, dict):
+                results = [results]
+
+            if results:
+                affected = [r.get('target_label') for r in results if r.get('target_label')]
+                print(f"  🧠 Semantic AI: Affecting {len(affected)} objects based on environment")
+                for r in results[:3]:
+                    reason = r.get('reason', 'matched')
+                    print(f"     • {r.get('target_label')} - {reason}")
+
+            return results
+
+        except Exception as e:
+            print(f"  ⚠️ Environmental processing error: {e}")
+            return []
     
     def process_request_with_vision(self, user_request, frame, mask_labels, mask_centers):
         """Use Gemini VISION to SEE the frame and map user request to correct objects.
@@ -1416,7 +1564,7 @@ class EnvironmentController:
         
         # Feedback loop system
         self.last_feedback_validation = 0
-        self.feedback_validation_interval = 0.5  # Validate every 500ms
+        self.feedback_validation_interval = 15.0  # Validate every 15 seconds (conservative for free tier)
         self.detection_history = []  # Track detection history for learning
         self.adaptive_thresholds = {
             "yolo_conf": 0.10,  # Lower YOLO confidence to detect more objects
@@ -1737,6 +1885,12 @@ class EnvironmentController:
                 all_labels_to_mask[label] = mask
         
         # ==========================================
+        # DETECT AND MARK ADJACENT BOUNDARIES
+        # Multi-color boundary tracing for adjacent objects
+        # ==========================================
+        adjacent_boundaries = self._detect_adjacent_boundaries(tracked_masks_for_display)
+
+        # ==========================================
         # DRAW BORDERS AND LABELS (for ALL detected objects)
         # Show boundaries for all detected items so user can see what's available
         # But visual effects (shading/blur/color) are only applied when requested
@@ -1753,21 +1907,21 @@ class EnvironmentController:
             (255, 255, 255), # White
             (100, 255, 200), # Mint
         ]
-        
+
         # Draw borders and labels for ALL masks (so user can see what's detected)
         # But visual effects will only be applied to requested items
         if not self.clean_view_mode:
             for idx, (mask, label, center) in enumerate(tracked_masks_for_display):
                 if mask is None or mask.shape != (h, w):
                     continue
-                
+
                 mask_u8 = (mask * 255).astype(np.uint8)
                 contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
+
                 # Check if this mask has an active effect
                 matched_effect = self._match_effect(label)
                 has_effect = matched_effect is not None
-                
+
                 # Use different border colors: brighter for items with effects, dimmer for others
                 if has_effect:
                     border_color = bright_colors[idx % len(bright_colors)]
@@ -1775,8 +1929,19 @@ class EnvironmentController:
                 else:
                     border_color = (100, 100, 100)  # Dim gray for unrequested items
                     border_width = 1
-                
+
                 cv2.drawContours(display, contours, -1, border_color, border_width)
+
+            # ==========================================
+            # DRAW MULTI-COLOR BOUNDARIES FOR ADJACENT OBJECTS
+            # Different color for shared boundaries to make adjacent objects distinguishable
+            # ==========================================
+            boundary_color = (255, 255, 0)  # Yellow for adjacent boundaries
+            for boundary_info in adjacent_boundaries:
+                boundary_mask = boundary_info['boundary']
+                # Draw the boundary with a distinct color
+                boundary_contours, _ = cv2.findContours(boundary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(display, boundary_contours, -1, boundary_color, 2)
                 
                 # Draw label at center
                 if center and center[0] > 0 and label:
@@ -2082,19 +2247,30 @@ class EnvironmentController:
                 for mask_data in sam_results[0].masks.data.cpu().numpy():
                     mask = cv2.resize(mask_data.astype(np.float32), (w, h))
                     mask_binary = mask > 0.5
-                    
+
                     # Remove overlap
                     clean_mask = mask_binary & ~used_pixels
-                    
+
                     if np.sum(clean_mask) < 500:
                         continue
-                    
-                    # Refine
-                    mask_u8 = (clean_mask * 255).astype(np.uint8)
-                    kernel = np.ones((3,3), np.uint8)
-                    mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
-                    clean_mask = mask_u8.astype(np.float32) / 255.0
-                    
+
+                    # ==========================================
+                    # ENHANCED MASK REFINEMENT
+                    # Apply advanced edge refinement for tight, quality boundaries
+                    # ==========================================
+                    clean_mask_float = clean_mask.astype(np.float32)
+                    refined_mask = self._refine_mask_edges(frame, clean_mask_float)
+
+                    # Ensure refined mask is valid
+                    if refined_mask is not None and np.sum(refined_mask > 0.5) >= 500:
+                        clean_mask = refined_mask
+                    else:
+                        # Fallback to basic morphological refinement
+                        mask_u8 = (clean_mask * 255).astype(np.uint8)
+                        kernel = np.ones((3,3), np.uint8)
+                        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
+                        clean_mask = mask_u8.astype(np.float32) / 255.0
+
                     used_pixels |= (clean_mask > 0.5)
                     
                     # Get label from YOLO or semantic analysis
@@ -2456,16 +2632,31 @@ class EnvironmentController:
         return color if color else None
     
     def _process_voice_command(self, command):
-        """Process a voice command through Gemini VISION. Supports MULTIPLE targets."""
+        """Process a voice command through Gemini VISION. Supports MULTIPLE targets and ENVIRONMENTAL commands."""
         print(f"\n{'='*50}")
         print(f"🎯 Processing: '{command}'")
-        
+
         mask_labels = [m[1] for m in self.masks]
         mask_centers = [m[2] for m in self.masks]
         print(f"📋 Available labels: {mask_labels}")
-        
-        # Use VISION model - pass the current frame so Gemini can SEE what user is referring to
-        if self.current_frame is not None:
+
+        # Detect if this is an environmental command (not targeting specific objects)
+        command_lower = command.lower()
+        environmental_keywords = [
+            "lighting", "lights", "bright", "dark", "glare", "harsh",
+            "overstimulating", "overwhelming", "too much", "visual noise",
+            "distracting", "colorful", "saturated", "contrast"
+        ]
+
+        is_environmental = any(keyword in command_lower for keyword in environmental_keywords)
+        # Also check if no specific object is mentioned
+        no_specific_object = not any(label.lower() in command_lower for label in mask_labels if not label.startswith("~"))
+
+        if is_environmental and no_specific_object:
+            print("🌍 Detected environmental command - using semantic understanding...")
+            results = self.gemini.process_environmental_command(command, mask_labels, mask_centers)
+        elif self.current_frame is not None:
+            # Use VISION model - pass the current frame so Gemini can SEE what user is referring to
             print("👁️ Using Gemini Vision to analyze scene...")
             results = self.gemini.process_request_with_vision(
                 command,
@@ -2944,6 +3135,125 @@ class EnvironmentController:
         self.active_effects = {}
         print("🧹 Cleared all effects")
     
+    def _refine_mask_edges(self, frame, mask, iterations=2):
+        """Refine mask edges using bilateral filtering and morphological operations for tight, quality edges."""
+        if mask is None or frame is None:
+            return mask
+
+        try:
+            # Convert mask to uint8
+            mask_u8 = (mask * 255).astype(np.uint8)
+
+            # Apply bilateral filter to smooth while preserving edges
+            # This helps create clean boundaries
+            mask_filtered = cv2.bilateralFilter(mask_u8, 5, 50, 50)
+
+            # Apply morphological opening to remove small noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_opened = cv2.morphologyEx(mask_filtered, cv2.MORPH_OPEN, kernel)
+
+            # Apply morphological closing to fill small holes
+            mask_closed = cv2.morphologyEx(mask_opened, cv2.MORPH_CLOSE, kernel)
+
+            # Edge-aware refinement using the original frame
+            # Create a fine mask using GrabCut-style refinement
+            mask_refined = self._grabcut_refinement(frame, mask_closed)
+
+            return mask_refined.astype(np.float32) / 255.0
+
+        except Exception as e:
+            # If refinement fails, return original mask
+            return mask
+
+    def _grabcut_refinement(self, frame, mask_u8):
+        """Use GrabCut algorithm for precise mask refinement with tight edges."""
+        try:
+            h, w = mask_u8.shape
+
+            # Create initial mask for GrabCut
+            # GrabCut expects: 0=bg, 1=fg, 2=probable_bg, 3=probable_fg
+            grabcut_mask = np.zeros(mask_u8.shape, dtype=np.uint8)
+
+            # Core region (high confidence foreground)
+            core_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            core_mask = cv2.erode(mask_u8, core_kernel, iterations=2)
+            grabcut_mask[core_mask > 128] = 1  # Definite foreground
+
+            # Edge region (probable foreground)
+            edge_mask = mask_u8 - core_mask
+            grabcut_mask[edge_mask > 64] = 3  # Probable foreground
+
+            # Background region
+            bg_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            dilated_mask = cv2.dilate(mask_u8, bg_kernel, iterations=2)
+            grabcut_mask[dilated_mask == 0] = 0  # Definite background
+
+            # Check if we have enough foreground pixels
+            if np.sum(grabcut_mask == 1) < 100:
+                return mask_u8  # Not enough data, return original
+
+            # Apply GrabCut (just 1 iteration for speed)
+            bgd_model = np.zeros((1, 65), dtype=np.float64)
+            fgd_model = np.zeros((1, 65), dtype=np.float64)
+
+            try:
+                cv2.grabCut(frame, grabcut_mask, None, bgd_model, fgd_model,
+                           1, cv2.GC_INIT_WITH_MASK)
+
+                # Extract foreground (1 and 3 are foreground)
+                refined_mask = np.where((grabcut_mask == 1) | (grabcut_mask == 3), 255, 0).astype(np.uint8)
+
+                return refined_mask
+
+            except:
+                # GrabCut failed, return original
+                return mask_u8
+
+        except Exception as e:
+            return mask_u8
+
+    def _detect_adjacent_boundaries(self, masks_with_labels):
+        """Detect boundaries between adjacent objects for multi-color tracing."""
+        if len(masks_with_labels) < 2:
+            return []
+
+        boundaries = []
+
+        # Compare each pair of masks
+        for i in range(len(masks_with_labels)):
+            mask_i, label_i, _ = masks_with_labels[i]
+            if mask_i is None:
+                continue
+
+            mask_i_u8 = (mask_i * 255).astype(np.uint8)
+
+            for j in range(i + 1, len(masks_with_labels)):
+                mask_j, label_j, _ = masks_with_labels[j]
+                if mask_j is None:
+                    continue
+
+                mask_j_u8 = (mask_j * 255).astype(np.uint8)
+
+                # Dilate both masks slightly to find where they would overlap
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                dilated_i = cv2.dilate(mask_i_u8, kernel, iterations=1)
+                dilated_j = cv2.dilate(mask_j_u8, kernel, iterations=1)
+
+                # Find intersection of dilated masks (adjacent boundary)
+                intersection = cv2.bitwise_and(dilated_i, dilated_j)
+
+                # If there's significant overlap, they're adjacent
+                if np.sum(intersection > 128) > 50:  # At least 50 pixels of boundary
+                    boundaries.append({
+                        'mask_i': i,
+                        'mask_j': j,
+                        'label_i': label_i,
+                        'label_j': label_j,
+                        'boundary': intersection
+                    })
+
+        return boundaries
+
     def _mask_center(self, mask):
         ys, xs = np.where(mask > 0.5)
         if len(xs) == 0:
