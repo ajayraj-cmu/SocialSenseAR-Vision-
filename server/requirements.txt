@@ -1,6 +1,3 @@
-# SocialSenseAR Vision Server
-# Install: pip install -r requirements.txt
-
 # Core
 websockets>=12.0
 protobuf>=4.25.0

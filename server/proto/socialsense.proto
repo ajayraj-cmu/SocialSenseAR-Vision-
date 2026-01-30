@@ -1,0 +1,112 @@
+syntax = "proto3";
+package socialsense;
+
+// ============================================================
+// CLIENT -> SERVER
+// ============================================================
+
+message ClientMessage {
+  uint64 frame_id = 1;
+  double timestamp_ms = 2;
+  oneof payload {
+    FramePayload frame = 3;
+    AudioPayload audio = 4;
+    ControlPayload control = 5;
+  }
+}
+
+message FramePayload {
+  bytes jpeg_data = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 quality = 4;
+}
+
+message AudioPayload {
+  bytes pcm16_data = 1;
+  uint32 sample_rate = 2;
+  uint32 num_samples = 3;
+}
+
+message ControlPayload {
+  string command = 1;
+}
+
+// ============================================================
+// SERVER -> CLIENT
+// ============================================================
+
+message ServerMessage {
+  uint64 frame_id = 1;
+  double timestamp_ms = 2;
+  double processing_time_ms = 3;
+
+  // All segmented objects in the scene
+  repeated SceneSegment segments = 10;
+
+  // Conversation state (from audio pipeline)
+  ConversationState conversation = 20;
+
+  // Server performance metrics
+  PerformanceMetrics metrics = 30;
+}
+
+message SceneSegment {
+  string label = 1;              // "desk", "ceiling_light", "person"
+  string asset_class = 2;        // "furniture", "lighting", "person", "screens", "structural", "objects"
+  float confidence = 3;
+
+  BoundingBox bbox = 4;          // normalized 0-1
+  bytes rle_mask = 5;            // RLE-encoded binary mask
+  uint32 mask_width = 6;
+  uint32 mask_height = 7;
+
+  float center_x = 8;           // centroid normalized 0-1
+  float center_y = 9;
+
+  string track_id = 10;         // stable ID across frames
+
+  // Only populated for segments with label "person" and visible face
+  EmotionResult emotion = 15;
+}
+
+message BoundingBox {
+  float x_min = 1;
+  float y_min = 2;
+  float x_max = 3;
+  float y_max = 4;
+}
+
+message EmotionResult {
+  string primary_emotion = 1;    // "happy", "sad", "angry", "neutral"
+  string display_label = 2;     // "Happy", "Frustrated", "Anxious"
+  string emoji = 3;             // unicode emoji
+  float confidence = 4;
+}
+
+message ConversationState {
+  string summary = 1;           // GPT-4o-mini summary, max ~80 chars
+  string vibe = 2;              // "engaged", "bored", "upset", "excited", "neutral"
+  string recent_utterance = 3;  // last transcribed speech
+  string question = 4;          // detected question
+  bool is_other_speaking = 5;
+  bool is_user_speaking = 6;
+  SocialCue social_cue = 10;
+}
+
+message SocialCue {
+  string cue_type = 1;          // "sarcasm", "rhetorical", "frustration", etc.
+  string icon = 2;              // emoji
+  string message = 3;           // display text
+  float confidence = 4;
+  double timestamp = 5;
+}
+
+message PerformanceMetrics {
+  float fastsam_ms = 1;
+  float labeling_ms = 2;
+  float emotion_ms = 3;
+  float audio_ms = 4;
+  float total_ms = 5;
+  uint32 segment_count = 6;
+}

@@ -1,139 +1,136 @@
-# SocialSenseAR - Vision
+# SocialSenseAR - Vision Server
 
-Real-time AR environment modifier with voice control, using SAM (Segment Anything Model), Gemini Vision, and sensory modulation features.
+Real-time segmentation server for AR glasses. Runs FastSAM + MediaPipe on a GPU PC, streams results to Meta Quest 3 via WebSocket + protobuf.
+
+## Architecture
+
+```
+Quest 3 (Unity)                    GPU PC (Python)
+┌──────────────┐    WebSocket     ┌──────────────────┐
+│ Camera JPEG  │ ────────────────>│ FastSAM + MediaPipe
+│              │                  │ + Gemini Vision   │
+│ Overlay RGBA │ <────────────────│ Protobuf + RLE    │
+└──────────────┘                  └──────────────────┘
+```
+
+### Server modules (`server/`)
+
+| File | Responsibility | Safe to edit? |
+|------|---------------|---------------|
+| `websocket_server.py` | WebSocket + protobuf serialization | CONTRACT (Unity depends on this) |
+| `proto/socialsense_pb2.py` | Protobuf schema | CONTRACT |
+| `encoding/rle.py` | RLE mask encoding (uint16 LE) | CONTRACT |
+| `vision/fastsam_segmenter.py` | FastSAM inference + orchestration | Yes |
+| `vision/mediapipe_detector.py` | Person/face/hands/pose detection | Yes |
+| `vision/semantic_labeler.py` | Position/size heuristic labels | Yes |
+| `vision/mask_refinement.py` | Bilateral + GrabCut refinement | Yes |
+| `vision/gemini_labeler.py` | Gemini Vision API labeling | Yes |
+| `pipeline/orchestrator.py` | Threading, caching, tracking | Yes |
+| `config.py` | All tunables | Yes |
+| `test_client.py` | Webcam test client (no headset) | Yes |
+
+**CONTRACT** files: changing these requires updating the Unity C# side.
+**Safe** files: edit freely without affecting the headset.
 
 ## Quick Start
 
-### Main Application (Voice-Controlled)
-
-```bash
-python scripts/sam_gemini_voice.py
-```
-
-**Voice Commands:**
-- Say **"hey vibe"** to start recording
-- Say your command (e.g., "blur my face", "dim the ceiling")
-- Say **"thanks"** to process
-
-### Vision Pipeline (FastSAM + YOLO-World + Gemini)
-
-```bash
-python fast_sam_yolo_combo.py
-```
-
-**Controls:**
-- D: Toggle Dev/Non-Dev mode
-- Q: Quit
-- S: Save screenshot
-
-### Alternative Entry Point
-
-```bash
-python main.py
-```
-
-## Project Structure
-
-```
-SocialSenseAR-Vision/
-├── main.py                      # Perceptual modulation engine entry point
-├── fast_sam_yolo_combo.py       # Vision pipeline: FastSAM + YOLO-World + Gemini
-├── requirements.txt             # Python dependencies
-├── .env                         # API keys (create from .env.example)
-├── config/                      # Configuration files
-├── src/                         # Core modular source code
-│   ├── audio/                   # Audio processing and transformation
-│   ├── capture/                 # Video capture and frame buffering
-│   ├── core/                    # Core contracts and type definitions
-│   ├── depth/                   # Depth estimation
-│   ├── intent/                  # NLP and intent parsing
-│   ├── pipeline/                # Main pipeline orchestrator
-│   ├── safety/                  # Safety layer and monitoring
-│   ├── segmentation/            # SAM segmentation modules
-│   ├── tracking/                # Object tracking (Kalman filters)
-│   ├── transforms/              # Visual transformations
-│   └── voice/                   # Voice command processing
-├── scripts/                     # Standalone applications
-│   └── sam_gemini_voice.py      # Main voice-controlled app
-├── docs/                        # Documentation
-│   ├── README.md
-│   ├── PIPELINE_DOCUMENTATION.md
-│   ├── FEEDBACK_LOOP_DOCUMENTATION.md
-│   └── USAGE_GUIDE.md
-└── archive/                     # Archived demos and old docs
-    ├── old_scripts/
-    └── old_docs/
-```
-
-## Features
-
-- **Voice Control**: Wake word activation ("hey vibe" / "thanks")
-- **Real-time Segmentation**: FastSAM for precise object segmentation
-- **Smart Labeling**: Gemini Vision API for open-vocabulary detection
-- **Multi-modal Pipeline**: YOLO-World + FastSAM + Gemini combo
-- **Sensory Modulation**: Blur, brightness, color, motion dampening
-- **Persistent Tracking**: Kalman filter-based object tracking
-- **Safety Layer**: Prevents excessive visual/audio modifications
-
-## Requirements
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Key dependencies:
-- `ultralytics` (FastSAM, YOLO)
-- `google-generativeai` (Gemini API)
-- `speech_recognition` (Voice commands)
-- `mediapipe` (Body part segmentation)
-- `opencv-python` (Video processing)
+### 2. Set API keys
 
-## Configuration
-
-Create a `.env` file:
-
-```env
-GEMINI_API_KEY=your-gemini-api-key
-GOOGLE_API_KEY=your-google-api-key  # Fallback
+Create a `.env` file in the project root:
+```
+GEMINI_API_KEY=your-key-here
+OPENAI_API_KEY=your-key-here
 ```
 
-## Controls (Main App)
+### 3. Download models
 
-- **V** - Toggle clean/full view
-- **C** - Clear all effects
-- **L** - List all detected labels
-- **S** - Screenshot
-- **Q** - Quit
+Place these in the project root and `models/` directory:
+- `FastSAM-s.pt` (root) - from [ultralytics](https://github.com/ultralytics/ultralytics)
+- `models/selfie_segmenter.tflite` - from [MediaPipe](https://developers.google.com/mediapipe)
+- `models/face_landmarker.task`
+- `models/hand_landmarker.task`
+- `models/pose_landmarker_full.task`
 
-## Documentation
+### 4. Run the server
 
-See `docs/` folder:
-- `PIPELINE_DOCUMENTATION.md` - Full pipeline architecture
-- `FEEDBACK_LOOP_DOCUMENTATION.md` - Self-correction system
-- `USAGE_GUIDE.md` - Detailed usage instructions
+```bash
+python -m server.main --device cuda
+```
 
-## Architecture
+### 5. Test without a headset
 
-### Modular Design
+```bash
+python -m server.test_client --show
+```
 
-The codebase is organized into clean, modular components:
+## Server Flags
 
-- **Core**: Type-safe contracts and interfaces
-- **Pipeline**: Orchestrates all processing stages
-- **Segmentation**: FastSAM and SAM-based object segmentation
-- **Tracking**: Persistent object tracking with Kalman filters
-- **Intent**: Natural language processing for commands
-- **Transforms**: Visual and audio effect application
-- **Safety**: Ensures modifications stay within safe bounds
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `0.0.0.0` | Bind address |
+| `--port` | `8765` | WebSocket port |
+| `--device` | `cuda` | `cuda` or `cpu` |
+| `--gpu-id` | `0` | GPU index |
+| `--no-audio` | | Disable audio pipeline |
+| `--no-emotion` | | Disable emotion detection |
+| `--stub` | | Run without ML models (for testing) |
 
-### Vision Pipeline
+SAM confidence and resolution are set in `server/config.py` (`fastsam_conf`, `fastsam_imgsz`).
 
-The vision pipeline combines three powerful models:
+## Debug Logging
 
-1. **FastSAM**: Fast, accurate segmentation
-2. **YOLO-World**: Open-vocabulary object detection
-3. **Gemini Vision**: Label correction and unknown object identification
+Each vision module logs its own timing at DEBUG level. Set `LOG_LEVEL` to see per-stage breakdowns:
 
-## License
+```bash
+# Windows
+set LOG_LEVEL=DEBUG && python -m server.main --device cuda
 
-MIT License
+# Linux/Mac
+LOG_LEVEL=DEBUG python -m server.main --device cuda
+```
+
+- **MediaPipe**: selfie, face, hands, pose timing per frame
+- **Mask refinement**: bilateral, morphology, GrabCut per mask
+- **Semantic labeler**: label decision + area/aspect/position per mask
+- **FastSAM segmenter**: aggregated timing every 10th frame
+
+## Project Structure
+
+```
+SocialSenseAR-Vision/
+├── .env                    # API keys (not committed)
+├── .gitignore
+├── requirements.txt        # Python dependencies
+├── FastSAM-s.pt           # FastSAM model (not committed)
+├── models/                 # MediaPipe models (not committed)
+│   ├── selfie_segmenter.tflite
+│   ├── face_landmarker.task
+│   ├── hand_landmarker.task
+│   └── pose_landmarker_full.task
+└── server/
+    ├── main.py             # Entry point
+    ├── config.py           # All tunables
+    ├── websocket_server.py # WebSocket + protobuf
+    ├── test_client.py      # Webcam test client
+    ├── proto/
+    │   └── socialsense_pb2.py
+    ├── encoding/
+    │   └── rle.py
+    ├── pipeline/
+    │   └── orchestrator.py
+    ├── vision/
+    │   ├── fastsam_segmenter.py
+    │   ├── mediapipe_detector.py
+    │   ├── semantic_labeler.py
+    │   ├── mask_refinement.py
+    │   └── gemini_labeler.py
+    └── audio/
+        ├── transcriber.py
+        └── social_cue_detector.py
+```
