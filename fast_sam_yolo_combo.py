@@ -23,6 +23,13 @@ import sys
 from PIL import Image
 from ultralytics import FastSAM, YOLOWorld
 
+# Load .env so GEMINI_API_KEY / GOOGLE_API_KEY are available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Force unbuffered output for immediate feedback
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
@@ -110,7 +117,7 @@ class FastSAMYOLOWorldGemini:
                     if GEMINI_NEW_SDK:
                         # New SDK
                         self.gemini_client = genai.Client(api_key=api_key)
-                        self.gemini_model = "gemini-2.0-flash-exp"
+                        self.gemini_model = "gemini-2.0-flash"
                     else:
                         # Legacy SDK - use models that actually exist
                         genai.configure(api_key=api_key)
