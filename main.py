@@ -40,10 +40,6 @@ from src.core.contracts import SafetyConstraints
 from src.voice.voice_commander import VoiceCommander
 
 
-# ============================================================
-# LOGGING CONFIGURATION
-# ============================================================
-
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
     """Configure logging."""
     logger.remove()  # Remove default handler
@@ -67,10 +63,6 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
             retention="7 days",
         )
 
-
-# ============================================================
-# KEYBOARD INPUT HANDLER
-# ============================================================
 
 class KeyboardHandler:
     """Handles keyboard input for the application."""
@@ -127,10 +119,6 @@ class KeyboardHandler:
     def quit_requested(self) -> bool:
         return self._quit_requested
 
-
-# ============================================================
-# OUTPUT RENDERER
-# ============================================================
 
 class OutputRenderer:
     """Renders output to display and optional virtual camera."""
@@ -272,10 +260,6 @@ class OutputRenderer:
         """Close the renderer."""
         cv2.destroyAllWindows()
 
-
-# ============================================================
-# MAIN APPLICATION
-# ============================================================
 
 class PerceptualModulationEngine:
     """Main application class."""
@@ -436,10 +420,6 @@ class PerceptualModulationEngine:
             self.renderer.close()
             logger.info("Engine stopped")
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 def main():
     """Main entry point."""
