@@ -1,8 +1,8 @@
-# SocialSenseAR
+# SocialSenseAR - Vision
 
 Real-time AR environment modifier with voice control, using SAM (Segment Anything Model), Gemini Vision, and sensory modulation features.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Main Application (Voice-Controlled)
 
@@ -15,59 +15,67 @@ python scripts/sam_gemini_voice.py
 - Say your command (e.g., "blur my face", "dim the ceiling")
 - Say **"thanks"** to process
 
+### Vision Pipeline (FastSAM + YOLO-World + Gemini)
+
+```bash
+python fast_sam_yolo_combo.py
+```
+
+**Controls:**
+- D: Toggle Dev/Non-Dev mode
+- Q: Quit
+- S: Save screenshot
+
 ### Alternative Entry Point
 
 ```bash
 python main.py
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
-SocialSenseAR/
-├── main.py                 # Main entry point (perceptual modulation engine)
-├── requirements.txt        # Python dependencies
-├── config/                 # Configuration files
-├── src/                     # Core source code
-│   ├── audio/              # Audio processing
-│   ├── capture/            # Video capture
-│   ├── core/               # Core contracts and types
-│   ├── depth/              # Depth estimation
-│   ├── intent/             # NLP and intent parsing
-│   ├── pipeline/           # Main pipeline orchestrator
-│   ├── safety/             # Safety layer and monitoring
-│   ├── segmentation/       # SAM segmentation
-│   ├── tracking/           # Object tracking
-│   ├── transforms/         # Visual transformations
-│   └── voice/              # Voice command processing
-├── scripts/                # Standalone scripts and demos
-│   ├── sam_gemini_voice.py # Main voice-controlled app ⭐
-│   ├── sam_*.py            # Various SAM demo scripts
-│   └── fast_*.py           # FastSAM scripts
-├── docs/                   # Documentation
-│   ├── README.md           # Main documentation
+SocialSenseAR-Vision/
+├── main.py                      # Perceptual modulation engine entry point
+├── fast_sam_yolo_combo.py       # Vision pipeline: FastSAM + YOLO-World + Gemini
+├── requirements.txt             # Python dependencies
+├── .env                         # API keys (create from .env.example)
+├── config/                      # Configuration files
+├── src/                         # Core modular source code
+│   ├── audio/                   # Audio processing and transformation
+│   ├── capture/                 # Video capture and frame buffering
+│   ├── core/                    # Core contracts and type definitions
+│   ├── depth/                   # Depth estimation
+│   ├── intent/                  # NLP and intent parsing
+│   ├── pipeline/                # Main pipeline orchestrator
+│   ├── safety/                  # Safety layer and monitoring
+│   ├── segmentation/            # SAM segmentation modules
+│   ├── tracking/                # Object tracking (Kalman filters)
+│   ├── transforms/              # Visual transformations
+│   └── voice/                   # Voice command processing
+├── scripts/                     # Standalone applications
+│   └── sam_gemini_voice.py      # Main voice-controlled app
+├── docs/                        # Documentation
+│   ├── README.md
 │   ├── PIPELINE_DOCUMENTATION.md
 │   ├── FEEDBACK_LOOP_DOCUMENTATION.md
-│   └── *.md                # Other documentation
-├── models/                 # Model weights
-│   ├── FastSAM-s.pt
-│   ├── yolov8*.pt
-│   └── sam_*.pth
-├── assets/                 # Images, HTML, etc.
-├── logs/                   # Log files
-└── recordings/             # Audio/video recordings
+│   └── USAGE_GUIDE.md
+└── archive/                     # Archived demos and old docs
+    ├── old_scripts/
+    └── old_docs/
 ```
 
-## 🎯 Features
+## Features
 
 - **Voice Control**: Wake word activation ("hey vibe" / "thanks")
-- **Real-time Segmentation**: FastSAM for object segmentation
+- **Real-time Segmentation**: FastSAM for precise object segmentation
 - **Smart Labeling**: Gemini Vision API for open-vocabulary detection
+- **Multi-modal Pipeline**: YOLO-World + FastSAM + Gemini combo
 - **Sensory Modulation**: Blur, brightness, color, motion dampening
-- **Persistent Tracking**: Masks track objects during movement
-- **Clean View Mode**: Toggle between full view and effects-only
+- **Persistent Tracking**: Kalman filter-based object tracking
+- **Safety Layer**: Prevents excessive visual/audio modifications
 
-## 📋 Requirements
+## Requirements
 
 ```bash
 pip install -r requirements.txt
@@ -80,23 +88,16 @@ Key dependencies:
 - `mediapipe` (Body part segmentation)
 - `opencv-python` (Video processing)
 
-## 🔧 Configuration
+## Configuration
 
 Create a `.env` file:
 
 ```env
 GEMINI_API_KEY=your-gemini-api-key
-OVERSHOOT_API_KEY=your-overshoot-api-key  # Optional
+GOOGLE_API_KEY=your-google-api-key  # Fallback
 ```
 
-## 📖 Documentation
-
-See `docs/` folder for detailed documentation:
-- `PIPELINE_DOCUMENTATION.md` - Full pipeline architecture
-- `FEEDBACK_LOOP_DOCUMENTATION.md` - Self-correction system
-- `USAGE_GUIDE.md` - Usage instructions
-
-## ⌨️ Controls
+## Controls (Main App)
 
 - **V** - Toggle clean/full view
 - **C** - Clear all effects
@@ -104,11 +105,35 @@ See `docs/` folder for detailed documentation:
 - **S** - Screenshot
 - **Q** - Quit
 
-## 🤝 Contributing
+## Documentation
 
-See the main documentation in `docs/` for architecture details and contribution guidelines.
+See `docs/` folder:
+- `PIPELINE_DOCUMENTATION.md` - Full pipeline architecture
+- `FEEDBACK_LOOP_DOCUMENTATION.md` - Self-correction system
+- `USAGE_GUIDE.md` - Detailed usage instructions
 
-## 📄 License
+## Architecture
+
+### Modular Design
+
+The codebase is organized into clean, modular components:
+
+- **Core**: Type-safe contracts and interfaces
+- **Pipeline**: Orchestrates all processing stages
+- **Segmentation**: FastSAM and SAM-based object segmentation
+- **Tracking**: Persistent object tracking with Kalman filters
+- **Intent**: Natural language processing for commands
+- **Transforms**: Visual and audio effect application
+- **Safety**: Ensures modifications stay within safe bounds
+
+### Vision Pipeline
+
+The vision pipeline combines three powerful models:
+
+1. **FastSAM**: Fast, accurate segmentation
+2. **YOLO-World**: Open-vocabulary object detection
+3. **Gemini Vision**: Label correction and unknown object identification
+
+## License
 
 MIT License
-

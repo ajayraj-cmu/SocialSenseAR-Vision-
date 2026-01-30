@@ -165,11 +165,6 @@ class FastSAMYOLOWorldGemini:
                     'confidence': conf
                 })
 
-        # VERBOSE logging every frame
-        print(f"[Frame {self.frame_count}] YOLO-World detected: {len(yolo_detections)} objects")
-        if yolo_detections:
-            for det in yolo_detections[:5]:  # Show first 5
-                print(f"  - {det['label']} (conf: {det['confidence']:.2f})")
 
         # Run FastSAM for segmentation with AGGRESSIVE parameters
         sam_results = self.sam(
@@ -191,8 +186,6 @@ class FastSAMYOLOWorldGemini:
                 mask_pixels = np.sum(mask_resized > 0.5)
                 if mask_pixels > 100:  # At least 100 pixels
                     masks.append(mask_resized)
-
-        print(f"[Frame {self.frame_count}] FastSAM detected: {len(masks)} masks")
 
         self.frame_count += 1
         return yolo_detections, masks
@@ -235,7 +228,6 @@ class FastSAMYOLOWorldGemini:
 
             if best_match:
                 used_detections.add(best_match_idx)
-                print(f"  Mask {i+1} → YOLO: '{best_match['label']}' (IOU: {best_iou:.2f}, conf: {best_match['confidence']:.2f})")
 
             # Check if we have a Gemini correction for this label
             label = best_match['label'] if best_match else None
@@ -254,10 +246,6 @@ class FastSAMYOLOWorldGemini:
                 'needs_gemini': True,  # Review everything!
                 'original_yolo_label': best_match['label'] if best_match else None
             })
-
-        unmatched = len([m for m in matched if not m['yolo_match']])
-        low_conf = len([m for m in matched if m['yolo_match'] and m['confidence'] < 0.3])
-        print(f"  Summary: {len(matched)} total | {len(matched) - unmatched} matched | {unmatched} unknown | {low_conf} low-conf")
 
         return matched
 
@@ -298,8 +286,6 @@ class FastSAMYOLOWorldGemini:
 
         # Limit to max objects to avoid overwhelming Gemini
         needs_review = needs_review[:self.max_gemini_objects]
-
-        print(f"\n  🤖 Calling Gemini to review {len(needs_review)} objects (prioritized)...")
 
         try:
             # Convert frame to PIL
@@ -373,8 +359,6 @@ RULES:
 
             self.last_gemini_call = current_time
 
-            print(f"  Gemini response (first 150 chars): {response_text[:150]}")
-
             # Parse response
             lines = response_text.strip().split('\n')
             gemini_labels = {}
@@ -400,8 +384,6 @@ RULES:
                         except Exception:
                             continue
 
-            print(f"  Parsed {len(gemini_labels)} labels from Gemini")
-
             # Update labels and track corrections
             for idx, obj in enumerate(needs_review):
                 if (idx + 1) in gemini_labels:
@@ -411,9 +393,6 @@ RULES:
                     # Track correction if YOLO was wrong
                     if old_label and old_label != new_label:
                         self.gemini_corrections[old_label] = new_label
-                        print(f"  ✅ Gemini corrected: '{old_label}' → '{new_label}'")
-                    else:
-                        print(f"  ✅ Gemini labeled: #{idx+1} = '{new_label}'")
 
                     # Find object in matched_objects and update
                     for mo in matched_objects:
@@ -424,7 +403,7 @@ RULES:
                             mo['needs_gemini'] = False
 
         except Exception as e:
-            print(f"  ⚠️  Gemini error: {type(e).__name__}: {str(e)[:150]}")
+            pass
 
         return matched_objects
 
