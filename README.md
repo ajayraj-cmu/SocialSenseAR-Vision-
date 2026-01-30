@@ -32,37 +32,38 @@ python fast_sam_yolo_combo.py
 python main.py
 ```
 
-## Project Structure
+## Project Structure (Simplified)
 
 ```
-SocialSenseAR-Vision/
+Meta X SocialSense/
 ├── main.py                      # Perceptual modulation engine entry point
-├── fast_sam_yolo_combo.py       # Vision pipeline: FastSAM + YOLO-World + Gemini
 ├── requirements.txt             # Python dependencies
 ├── .env                         # API keys (create from .env.example)
 ├── config/                      # Configuration files
-├── src/                         # Core modular source code
-│   ├── audio/                   # Audio processing and transformation
+├── src/                         # Core modular source code (SIMPLIFIED)
 │   ├── capture/                 # Video capture and frame buffering
 │   ├── core/                    # Core contracts and type definitions
-│   ├── depth/                   # Depth estimation
-│   ├── intent/                  # NLP and intent parsing
-│   ├── pipeline/                # Main pipeline orchestrator
-│   ├── safety/                  # Safety layer and monitoring
-│   ├── segmentation/            # SAM segmentation modules
-│   ├── tracking/                # Object tracking (Kalman filters)
+│   ├── intent/                  # LLM-based intent parsing (Gemini)
+│   ├── pipeline/                # Main pipeline orchestrator (6-stage)
+│   ├── safety/                  # Safety layer and sensory monitoring
+│   ├── segmentation/            # SAM auto-segmentation + mask processing
 │   ├── transforms/              # Visual transformations
 │   └── voice/                   # Voice command processing
 ├── scripts/                     # Standalone applications
-│   └── sam_gemini_voice.py      # Main voice-controlled app
+│   └── sam_gemini_voice.py      # Main voice-controlled app (WORKING)
 ├── docs/                        # Documentation
-│   ├── README.md
-│   ├── PIPELINE_DOCUMENTATION.md
-│   ├── FEEDBACK_LOOP_DOCUMENTATION.md
-│   └── USAGE_GUIDE.md
-└── archive/                     # Archived demos and old docs
-    ├── old_scripts/
-    └── old_docs/
+└── archive/                     # Archived code and separate projects
+    ├── separate_projects/
+    │   └── QuestPythonProcessor/ # Quest VR pipeline (separate project)
+    ├── Audio_Merge/             # Audio UI prototypes
+    └── old_scripts/
+
+**Removed (3,000+ lines of bloat):**
+- ✗ audio/ subsystem (unused)
+- ✗ tracking/ modules (over-engineered)
+- ✗ depth/ estimation (not utilized)
+- ✗ Duplicate segmentation implementations
+- ✗ Duplicate intent parsers
 ```
 
 ## Features
@@ -72,8 +73,8 @@ SocialSenseAR-Vision/
 - **Smart Labeling**: Gemini Vision API for open-vocabulary detection
 - **Multi-modal Pipeline**: YOLO-World + FastSAM + Gemini combo
 - **Sensory Modulation**: Blur, brightness, color, motion dampening
-- **Persistent Tracking**: Kalman filter-based object tracking
-- **Safety Layer**: Prevents excessive visual/audio modifications
+- **Safety Layer**: Prevents excessive visual modifications
+- **Simplified Architecture**: 6-stage pipeline (down from 10), ~60% less code
 
 ## Requirements
 

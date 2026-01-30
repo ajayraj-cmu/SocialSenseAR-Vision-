@@ -1,5 +1,5 @@
 """
-Segmentation module using SAM-3 (Segment Anything Model).
+Segmentation module using SAM (Segment Anything Model).
 
 Responsibilities:
 - Real-time object segmentation
@@ -8,7 +8,7 @@ Responsibilities:
 - Morphological cleaning
 """
 
-from .sam_segmenter import SAMSegmenter
+from .sam_auto_segmenter import SAMAutoSegmenter
 from .mask_processor import MaskProcessor
 
 

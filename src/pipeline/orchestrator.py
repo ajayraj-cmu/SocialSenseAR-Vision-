@@ -40,17 +40,8 @@ from src.core.contracts import (
 )
 from src.capture.video_capture import VideoCapture
 from src.capture.frame_buffer import FrameBuffer
-from src.segmentation.sam_segmenter import SAMSegmenter
-from src.segmentation.realtime_segmenter import RealtimeSegmenter
 from src.segmentation.sam_auto_segmenter import SAMAutoSegmenter
-from src.tracking.object_tracker import ObjectTracker
 from src.intent.llm_interpreter import LLMInterpreter
-from src.depth.depth_estimator import DepthEstimator
-from src.audio.audio_processor import AudioProcessor
-from src.audio.audio_visual_binder import AudioVisualBinder
-from src.audio.audio_transformer import AudioTransformer
-from src.intent.intent_parser import IntentParser
-from src.intent.target_resolver import TargetResolver
 from src.transforms.visual_transformer import VisualTransformer
 from src.safety.safety_layer import SafetyLayer
 from src.safety.sensory_monitor import SensoryLoadMonitor
@@ -112,14 +103,9 @@ class PipelineOrchestrator:
             height=self.config.video_height,
             fps=self.config.video_fps,
         )
-        
-        self._audio_processor = AudioProcessor(
-            sample_rate=self.config.audio_sample_rate,
-            channels=1,  # Force mono for compatibility
-        )
-        
+
         self._frame_buffer = FrameBuffer()
-        
+
         # Use SAM Auto Segmenter for ALL objects (not just faces/people)
         self._segmenter = SAMAutoSegmenter(
             min_object_area=3000,
@@ -128,27 +114,14 @@ class PipelineOrchestrator:
             enable_contour_detection=True,
             enable_color_clustering=True,
         )
-        self._tracker = ObjectTracker()
-        
+
         # LLM interpreter for complete freedom in verbal requests
         self._llm_interpreter = LLMInterpreter(
             fallback_to_rules=True,  # Use rule-based if no API key
         )
-        self._depth_estimator = DepthEstimator()
-        
-        self._audio_binder = AudioVisualBinder()
-        self._audio_transformer = AudioTransformer(
-            sample_rate=self.config.audio_sample_rate,
-        )
-        
-        self._intent_parser = IntentParser()
-        self._target_resolver = TargetResolver(
-            frame_width=self.config.video_width,
-            frame_height=self.config.video_height,
-        )
-        
+
         self._visual_transformer = VisualTransformer()
-        
+
         self._safety_layer = SafetyLayer()
         self._sensory_monitor = SensoryLoadMonitor()
         
@@ -170,18 +143,12 @@ class PipelineOrchestrator:
         """
         # Initialize components
         if not self._segmenter.initialize():
-            logger.warning("Real-time segmenter initialization failed")
-        
-        if not self._depth_estimator.initialize():
-            logger.warning("Depth estimator initialization failed, using fallback")
-        
+            logger.warning("Segmenter initialization failed")
+
         # Start capture
         if not self._video_capture.start():
             logger.error("Failed to start video capture")
             return False
-        
-        if not self._audio_processor.start():
-            logger.warning("Audio capture failed, running without audio")
         
         logger.info("Pipeline started")
         return True
@@ -189,27 +156,22 @@ class PipelineOrchestrator:
     def stop(self):
         """Stop the pipeline."""
         self._video_capture.stop()
-        self._audio_processor.stop()
         self._segmenter.shutdown()
-        self._depth_estimator.shutdown()
         logger.info("Pipeline stopped")
     
     def process_frame(self) -> PipelineOutput:
         """
         Process a single frame through the pipeline.
-        
-        Pipeline order (NEVER REORDER):
-        1. Acquire synchronized RGB + audio
-        2. Segment objects using SAM-3
-        3. Assign persistent object IDs via tracking
-        4. Estimate depth
-        5. Bind audio sources to visual entities
-        6. Parse user intent
-        7. Resolve intent to object IDs
-        8. Apply parameterized transformations
-        9. Enforce safety constraints
-        10. Render output streams
-        
+
+        Pipeline order (simplified):
+        1. Acquire RGB frame
+        2. Segment objects using SAM
+        3. Parse user intent
+        4. Resolve intent to object IDs
+        5. Apply parameterized transformations
+        6. Enforce safety constraints
+        7. Render output
+
         Returns:
             PipelineOutput with processed frame
         """
@@ -220,26 +182,22 @@ class PipelineOrchestrator:
             return self._passthrough_output("Emergency revert active")
         
         # ============================================================
-        # STEP 1: Acquire synchronized RGB + audio
+        # STEP 1: Acquire RGB frame
         # ============================================================
         video_frame, timestamp_ms, frame_id = self._video_capture.read_frame()
-        
+
         if video_frame is None:
             return self._passthrough_output("No video frame available")
-        
-        audio_chunk = self._audio_processor.peek_latest_chunk()
-        
+
         frame_data = FrameData(
             frame_id=frame_id,
             timestamp_ms=timestamp_ms,
             rgb_frame=video_frame,
-            audio_chunk=audio_chunk,
+            audio_chunk=None,
         )
-        
-        # Note: Recording happens AFTER processing, so we capture augmented frames
-        
+
         # ============================================================
-        # STEP 2: Segment objects using SAM-3
+        # STEP 2: Segment objects using SAM
         # ============================================================
         segmentation_result = None
         if frame_id % self.config.segmentation_interval_frames == 0:
@@ -249,70 +207,20 @@ class PipelineOrchestrator:
             
             if segmentation_result.success:
                 frame_data.segmented_objects = segmentation_result.objects
-        
-        # ============================================================
-        # STEP 3: Assign persistent object IDs via tracking
-        # ============================================================
-        if frame_data.segmented_objects:
-            tracking_result = self._tracker.update(
-                frame_data.segmented_objects,
-                frame_id
-            )
-            
-            if tracking_result.success:
-                frame_data.segmented_objects = tracking_result.updated_objects
-                
+
                 # Update state registry
                 for obj in frame_data.segmented_objects:
                     self._state.object_registry[obj.stable_id] = obj
-        else:
-            # Use existing tracked objects
-            frame_data.segmented_objects = self._tracker.get_all_active_objects()
-        
+
         # ============================================================
-        # STEP 4: Estimate depth
-        # ============================================================
-        if frame_id % self.config.depth_interval_frames == 0:
-            depth_map, depth_source, _ = self._depth_estimator.estimate_depth(
-                video_frame, frame_id
-            )
-            frame_data.depth_map = depth_map
-            
-            # Update object depths
-            for obj in frame_data.segmented_objects:
-                obj.depth_estimate = self._depth_estimator.get_depth_for_region(
-                    depth_map, obj.mask
-                )
-        
-        # ============================================================
-        # STEP 5: Bind audio sources to visual entities
-        # ============================================================
-        if audio_chunk is not None:
-            audio_sources = self._audio_binder.estimate_audio_sources(
-                audio_chunk,
-                self.config.audio_sample_rate
-            )
-            frame_data.audio_sources = audio_sources
-            
-            bindings = self._audio_binder.bind_audio_to_visual(
-                audio_sources,
-                frame_data.segmented_objects,
-                self.config.video_width,
-                self.config.video_height
-            )
-            frame_data.bindings = bindings
-            self._state.active_bindings = bindings
-        
-        # ============================================================
-        # STEPS 6-7: Parse user intent and resolve targets
+        # STEP 3: Parse user intent and resolve targets
         # ============================================================
         self._process_pending_commands(frame_data)
         
         # ============================================================
-        # STEP 8: Apply parameterized transformations
+        # STEP 4: Apply parameterized transformations
         # ============================================================
         output_frame = video_frame.copy()
-        output_audio = audio_chunk.copy() if audio_chunk is not None else None
         
         safety_applied = False
         
@@ -342,19 +250,11 @@ class PipelineOrchestrator:
                     frame_data
                 )
             
-            if operation.modality in [Modality.AUDIO, Modality.BOTH]:
-                if output_audio is not None:
-                    output_audio = self._apply_audio_transform(
-                        output_audio,
-                        operation,
-                        frame_data
-                    )
-            
             # Update operation progress
             operation.progress = min(1.0, operation.progress + 0.1)
         
         # ============================================================
-        # STEP 9: Enforce safety constraints and temporal smoothing
+        # STEP 5: Enforce safety constraints
         # ============================================================
         sensory_metrics = self._sensory_monitor.update(self._state.active_operations)
         self._safety_layer.update_sensory_load(sensory_metrics.total_load)
@@ -366,7 +266,7 @@ class PipelineOrchestrator:
             # Would apply additional smoothing here
         
         # ============================================================
-        # STEP 10: Render output streams
+        # STEP 6: Render output
         # ============================================================
         pipeline_end = time.perf_counter()
         total_latency = (pipeline_end - pipeline_start) * 1000
@@ -401,7 +301,7 @@ class PipelineOrchestrator:
             frame_id=frame_id,
             timestamp_ms=timestamp_ms,
             output_frame=output_frame,
-            output_audio=output_audio,
+            output_audio=None,
             total_latency_ms=total_latency,
             video_latency_ms=total_latency,
             latency_budget_exceeded=latency_exceeded,
@@ -612,23 +512,7 @@ class PipelineOrchestrator:
             logger.info(f"✅ Applied GLOBAL default blur")
         
         return np.clip(result, 0, 255).astype(np.uint8)
-    
-    def _apply_audio_transform(
-        self,
-        audio: NDArray[np.float32],
-        operation: TransformOperation,
-        frame_data: FrameData,
-    ) -> NDArray[np.float32]:
-        """Apply audio transformation."""
-        if isinstance(operation.operation, AudioOperation):
-            return self._audio_transformer.apply_transform(
-                audio,
-                operation.operation,
-                operation.parameters,
-                self._safety_layer.constraints,
-            )
-        return audio
-    
+
     def _process_pending_commands(self, frame_data: FrameData):
         """Process pending user commands using LLM interpretation."""
         while self._pending_commands:
@@ -833,10 +717,5 @@ class PipelineOrchestrator:
         if not self._frame_latencies:
             return 0.0
         return sum(self._frame_latencies) / len(self._frame_latencies)
-    
-    def get_object_description(self) -> str:
-        """Get human-readable description of detected objects."""
-        objects = list(self._state.object_registry.values())
-        return self._target_resolver.describe_objects(objects)
 
 
