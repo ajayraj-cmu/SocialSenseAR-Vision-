@@ -23,7 +23,12 @@
       "Bash(ls:*)",
       "Bash(curl:*)",
       "Bash(/c/scrcpy/scrcpy-win64-v3.3.4/scrcpy.exe --version)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(chmod:*)",
+      "Bash(find:*)",
+      "Bash(mkdir:*)",
+      "Bash(tree:*)",
+      "Bash(test:*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Marshall\\Documents\\GitHub\\nexhacks\\QuestCameraKit"

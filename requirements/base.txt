@@ -1,0 +1,36 @@
+# SocialSenseAR - Base Dependencies
+# Core vision pipeline only
+
+# CORE VISION & ML
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+mediapipe>=0.10.0
+timm>=0.9.0
+
+# SEGMENTATION & AI
+google-generativeai>=0.3.0
+Pillow>=10.0.0
+
+# AUDIO PROCESSING
+sounddevice>=0.4.6
+scipy>=1.11.0
+pyaudio>=0.2.13
+SpeechRecognition>=3.10.0
+
+# OBJECT TRACKING
+filterpy>=1.4.5
+scikit-image>=0.21.0
+
+# NLP
+spacy>=3.6.0
+
+# UTILITIES
+pynput>=1.7.6
+pydantic>=2.0.0
+loguru>=0.7.0
+rich>=13.0.0
+PyYAML>=6.0
+python-dotenv>=1.0.0

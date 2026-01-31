@@ -1,12 +1,2 @@
-"""
-Intent Parsing Module.
-
-Responsibilities:
-- Natural language → structured operations (LLM-based)
-- Command validation
-- Safety checking
-"""
-
+"""Intent Parsing Module."""
 from .llm_interpreter import LLMInterpreter
-
-

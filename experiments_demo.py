@@ -58,11 +58,11 @@ class FastSAMYOLOWorldGemini:
         print("\nLoading models...")
 
         # Load FastSAM
-        self.sam = FastSAM("FastSAM-s.pt")
+        self.sam = FastSAM("models/FastSAM-s.pt")
         print("  ✓ FastSAM loaded")
 
         # Load YOLO-World for open-vocabulary detection
-        self.yolo = YOLOWorld("yolov8s-worldv2.pt")
+        self.yolo = YOLOWorld("models/yolov8s-worldv2.pt")
 
         # Comprehensive indoor/campus vocabulary (from your main pipeline)
         self.vocab = [

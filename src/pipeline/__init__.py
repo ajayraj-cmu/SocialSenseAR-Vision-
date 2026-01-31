@@ -1,9 +1,2 @@
-"""
-Main Pipeline Module.
-
-Orchestrates the complete perceptual modulation pipeline.
-"""
-
+"""Main Pipeline Module."""
 from .orchestrator import PipelineOrchestrator
-
-

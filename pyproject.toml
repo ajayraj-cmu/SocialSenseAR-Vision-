@@ -1,0 +1,108 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "socialsensear"
+version = "0.1.0"
+description = "AR vision processing pipeline with real-time segmentation and voice control"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Meta X SocialSense Team"}
+]
+keywords = ["computer-vision", "ar", "segmentation", "gemini", "fastsam", "yolo"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "ultralytics>=8.0.0",
+    "mediapipe>=0.10.0",
+    "google-generativeai>=0.3.0",
+    "Pillow>=10.0.0",
+    "sounddevice>=0.4.6",
+    "scipy>=1.11.0",
+    "pyaudio>=0.2.13",
+    "SpeechRecognition>=3.10.0",
+    "filterpy>=1.4.5",
+    "scikit-image>=0.21.0",
+    "spacy>=3.6.0",
+    "pynput>=1.7.6",
+    "pydantic>=2.0.0",
+    "loguru>=0.7.0",
+    "rich>=13.0.0",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "python-multipart>=0.0.6",
+    "pyjwt>=2.8.0",
+    "passlib>=1.7.4",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.1.2",
+    "av>=11.0.0",
+    "aiortc>=1.6.0",
+    "opencv-python-headless>=4.9.0.80",
+    "boto3>=1.34.0",
+    "aioboto3>=12.3.0",
+    "aiodynamo>=23.10.0",
+    "prometheus-client>=0.19.0",
+    "watchtower>=3.0.1",
+    "pydantic-settings>=2.1.0",
+    "aiofiles>=23.2.1",
+    "orjson>=3.9.0",
+    "slowapi>=0.1.9",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.26.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+    "pylint>=3.0.0",
+    "line_profiler>=4.0.0",
+    "memory_profiler>=0.61.0",
+    "locust>=2.20.0",
+]
+
+[project.scripts]
+socialsensear = "src.pipeline.orchestrator:main"
+socialsensear-server = "server.streaming_server:main"
+
+[tool.setuptools]
+packages = ["src", "server"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=src --cov=server"
