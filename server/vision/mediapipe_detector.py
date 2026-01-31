@@ -49,6 +49,9 @@ class MediaPipeDetector:
         self.person_mask: np.ndarray | None = None
         self.frame_count = 0
 
+        # Debug info buffer — read by worker to send through pipe
+        self.debug_info: str | None = None
+
     # ------------------------------------------------------------------
     # Initialization — exact same options as sam_gemini_voice.py __init__
     # ------------------------------------------------------------------
@@ -72,7 +75,7 @@ class MediaPipeDetector:
                 mp.tasks.vision.ImageSegmenterOptions(
                     base_options=_BaseOptions(model_asset_path=selfie_path),
                     running_mode=_VisionRunningMode.VIDEO,
-                    output_category_mask=True,
+                    output_confidence_masks=True,
                 )
             )
             logger.info(f"      selfie segmenter: {(time.perf_counter() - t)*1000:.0f}ms")
@@ -158,9 +161,10 @@ class MediaPipeDetector:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
         # ============================================================
-        # Selfie segmenter (every 2 frames) — line 1735-1745
+        # Selfie segmenter (every 2 frames) — confidence mask approach
         # ============================================================
         t_selfie = time.perf_counter()
+        self.debug_info = None
         if self.frame_count % 2 == 0:
             if self._selfie is not None:
                 self._mp_timestamp_ms += 1
@@ -169,15 +173,38 @@ class MediaPipeDetector:
                     selfie_result = self._selfie.segment_for_video(
                         mp_image, self._mp_timestamp_ms
                     )
-                    if selfie_result.category_mask is not None:
-                        # np.squeeze — exact same as original line 1743
-                        self.person_mask = np.squeeze(
-                            selfie_result.category_mask.numpy_view()
-                        ).astype(np.float32)
+                    # confidence_masks is a list: [background_conf, person_conf]
+                    # Use index 1 (person class) as the person mask
+                    if selfie_result.confidence_masks and len(selfie_result.confidence_masks) > 1:
+                        raw = selfie_result.confidence_masks[1].numpy_view().copy()
+                        raw = np.squeeze(raw)
+                        self.person_mask = raw.astype(np.float32)
+                        if self.frame_count < 10:
+                            nz = np.count_nonzero(raw > 0.5)
+                            self.debug_info = (
+                                f"[SELFIE] confidence mask: dtype={raw.dtype} shape={raw.shape} "
+                                f"min={raw.min():.3f} max={raw.max():.3f} "
+                                f"nonzero(>0.5)={nz}/{raw.size} "
+                                f"n_masks={len(selfie_result.confidence_masks)}"
+                            )
+                    elif selfie_result.confidence_masks and len(selfie_result.confidence_masks) == 1:
+                        # Single-class model: the one mask IS the person confidence
+                        raw = selfie_result.confidence_masks[0].numpy_view().copy()
+                        raw = np.squeeze(raw)
+                        self.person_mask = raw.astype(np.float32)
+                        if self.frame_count < 10:
+                            nz = np.count_nonzero(raw > 0.5)
+                            self.debug_info = (
+                                f"[SELFIE] single mask: dtype={raw.dtype} shape={raw.shape} "
+                                f"min={raw.min():.3f} max={raw.max():.3f} "
+                                f"nonzero(>0.5)={nz}/{raw.size}"
+                            )
                     else:
                         self.person_mask = np.zeros((h, w), dtype=np.float32)
+                        self.debug_info = "[SELFIE] no confidence masks returned"
                 except Exception as e:
                     logger.warning(f"Selfie segmenter error: {e}")
+                    self.debug_info = f"[SELFIE] error: {e}"
         self.frame_count += 1
         selfie_ms = (time.perf_counter() - t_selfie) * 1000
 

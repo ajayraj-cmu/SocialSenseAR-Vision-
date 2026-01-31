@@ -36,6 +36,7 @@ class SocialSenseServer:
         self._cached_response_bytes: bytes = b""
         self._cached_response = None  # pb.ServerMessage for debug view
         self._cached_segments_id: int = 0  # id() of the segments list
+        self._last_screenshot_time: float = 0.0  # for periodic screenshot saving
 
     async def run(self):
         """Start the WebSocket server."""
@@ -141,7 +142,9 @@ class SocialSenseServer:
 
         for seg in result.segments:
             proto_seg = response.segments.add()
-            proto_seg.label = seg.label or ""
+            # Strip ~ prefix (internal "pending Gemini" marker)
+            label = seg.label or ""
+            proto_seg.label = label.lstrip("~")
             proto_seg.asset_class = seg.asset_class or ""
             proto_seg.confidence = seg.confidence
             proto_seg.bbox.x_min = seg.bbox[0]
@@ -203,7 +206,7 @@ class SocialSenseServer:
     _BRIGHT_COLORS = [
         (0, 255, 255), (255, 0, 255), (0, 255, 0), (255, 255, 0),
         (255, 128, 0), (128, 0, 255), (0, 128, 255), (255, 0, 128),
-        (255, 255, 255), (100, 255, 200),
+        (0, 200, 100), (100, 255, 200),
     ]
 
     def _show_debug_view(self, jpeg_data: bytes, response: pb.ServerMessage):
@@ -224,13 +227,21 @@ class SocialSenseServer:
                 continue
             mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
             if mask.shape[:2] != (h, w):
-                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
             mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
+            # Smooth mask before contour extraction
+            kernel = np.ones((7, 7), np.uint8)
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+            mask_u8 = cv2.GaussianBlur(mask_u8, (7, 7), 0)
+            _, mask_u8 = cv2.threshold(mask_u8, 128, 255, cv2.THRESH_BINARY)
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Filter small contour fragments and smooth remaining contours
+            contours = [cv2.approxPolyDP(c, 3.0, True) for c in contours if cv2.contourArea(c) > 1000]
             if not contours:
                 continue
             color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
-            cv2.drawContours(frame, contours, -1, color, 2)
+            cv2.drawContours(frame, contours, -1, color, 3)
             label = seg.label or seg.asset_class or ""
             if label:
                 cx = int(seg.center_x * w)
@@ -241,6 +252,15 @@ class SocialSenseServer:
 
         cv2.imshow("Quest Debug View", frame)
         cv2.waitKey(1)
+
+        # Auto-save screenshot every 5 seconds for iteration
+        now = time.time()
+        if now - self._last_screenshot_time >= 5.0:
+            self._last_screenshot_time = now
+            import os
+            ss_path = os.path.expanduser("~/Downloads/debug_view.png")
+            cv2.imwrite(ss_path, frame)
+            logger.info(f"Debug screenshot saved: {ss_path}")
 
     def _empty_response(self, frame_id: int) -> bytes:
         response = pb.ServerMessage()

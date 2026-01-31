@@ -9,6 +9,7 @@ SAFE TO EDIT: Changes here only affect label text/asset_class, not masks or prot
 
 import logging
 import numpy as np
+import cv2
 
 logger = logging.getLogger(__name__)
 
@@ -40,32 +41,46 @@ class SemanticLabeler:
         """Semantic labeling heuristic — conservative, short labels.
 
         Only confidently labels very large structural elements touching
-        frame edges. Everything else returns "object" and waits for Gemini.
+        frame edges. Everything else returns "~object" and waits for Gemini.
+        Uses cv2 ops instead of np.where for speed (~10x faster).
 
         Returns:
             (label, None) — second element kept for API compat.
         """
-        ys, xs = np.where(mask > 0.5)
+        # Accept both float32 [0,1] and uint8 [0,255] masks
+        if mask.dtype == np.uint8:
+            mask_u8 = mask  # Already uint8 (0 or 255) — cv2 ops work directly
+        else:
+            mask_u8 = (mask > 0.5).astype(np.uint8)
+        area = cv2.countNonZero(mask_u8)
 
-        if len(ys) == 0:
-            return "object", None
+        if area == 0:
+            return "~object", None
 
-        area_ratio = len(ys) / (h * w)
-        cy_norm = float(np.mean(ys)) / h
+        area_ratio = area / (h * w)
 
-        touches_top = np.any(ys < h * 0.03)
-        touches_bottom = np.any(ys > h * 0.97)
-        touches_left = np.any(xs < w * 0.03)
-        touches_right = np.any(xs > w * 0.97)
-        edge_count = sum([touches_top, touches_bottom, touches_left, touches_right])
+        # Only do expensive edge checks for large segments
+        if area_ratio > 0.20:
+            # Check edges via thin border slices (fast)
+            top_row = int(h * 0.03) or 1
+            bot_row = int(h * 0.97)
+            left_col = int(w * 0.03) or 1
+            right_col = int(w * 0.97)
 
-        # Only label structural for very large segments touching frame edges
-        if area_ratio > 0.20 and edge_count >= 2:
-            if cy_norm < 0.35:
-                return "ceiling", None
-            if cy_norm > 0.65:
-                return "floor", None
-            return "wall", None
+            touches_top = np.any(mask_u8[:top_row, :])
+            touches_bottom = np.any(mask_u8[bot_row:, :])
+            touches_left = np.any(mask_u8[:, :left_col])
+            touches_right = np.any(mask_u8[:, right_col:])
+            edge_count = touches_top + touches_bottom + touches_left + touches_right
+
+            if edge_count >= 2:
+                M = cv2.moments(mask_u8)
+                cy_norm = (M["m01"] / M["m00"]) / h if M["m00"] > 0 else 0.5
+                if cy_norm < 0.35:
+                    return "ceiling", None
+                if cy_norm > 0.65:
+                    return "floor", None
+                return "wall", None
 
         # Everything else — pending Gemini (~ prefix = unconfirmed)
         return "~object", None

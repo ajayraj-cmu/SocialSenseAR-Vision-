@@ -93,7 +93,7 @@ BRIGHT_COLORS = [
     (128, 0, 255),      # Purple
     (0, 128, 255),      # Light Blue
     (255, 0, 128),      # Pink
-    (255, 255, 255),    # White
+    (0, 200, 100),      # Emerald
     (100, 255, 200),    # Mint
 ]
 
@@ -128,8 +128,9 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
 
         mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
 
-        # Find contours
+        # Find contours — filter small fragments
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = [c for c in contours if cv2.contourArea(c) > 500]
         if not contours:
             continue
 
@@ -137,8 +138,9 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
         is_pending = label.startswith("~")
         display_label = label.lstrip("~") if is_pending else label
 
-        # Border color + width
-        border_color = BRIGHT_COLORS[i % len(BRIGHT_COLORS)]
+        # Stable color from track_id (consistent across frames)
+        color_idx = hash(seg.track_id) if seg.track_id else i
+        border_color = BRIGHT_COLORS[color_idx % len(BRIGHT_COLORS)]
         border_width = 2
 
         # Draw contour outlines
@@ -369,6 +371,16 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                                     (180, 180, 180), 1, cv2.LINE_AA)
 
                         cv2.imshow("SocialSenseAR", display)
+
+                        # Auto-save screenshot every 5s for visual iteration
+                        _now = time.perf_counter()
+                        if not hasattr(draw_overlay_fast, '_last_ss') or _now - draw_overlay_fast._last_ss >= 5.0:
+                            draw_overlay_fast._last_ss = _now
+                            import os
+                            ss_path = os.path.expanduser("~/Downloads/client_debug.png")
+                            cv2.imwrite(ss_path, display)
+                            print(f"Screenshot saved: {ss_path}")
+
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord("q"):
                             break
