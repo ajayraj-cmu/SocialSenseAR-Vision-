@@ -279,14 +279,14 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         latest_resp = resp
                         recv_count += 1
 
-                        # Detect actual SAM updates by checking if segments changed.
-                        # Server caches serialized bytes so metrics are stale —
-                        # instead fingerprint segment count + first bbox.
+                        # Detect actual SAM updates by fingerprinting ALL segments.
                         n = len(resp.segments)
                         if n > 0:
-                            s0 = resp.segments[0]
-                            sig = (n, round(s0.bbox.x_min, 3), round(s0.bbox.y_min, 3),
-                                   round(s0.center_x, 3), round(s0.center_y, 3))
+                            parts = [n]
+                            for s in resp.segments:
+                                parts.append(round(s.center_x, 2))
+                                parts.append(round(s.center_y, 2))
+                            sig = tuple(parts)
                         else:
                             sig = (0,)
                         if sig != last_seg_signature:

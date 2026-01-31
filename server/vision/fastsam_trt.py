@@ -131,7 +131,7 @@ class FastSAMTRT:
             self._context.execute_async_v3(self._stream.cuda_stream)
         self._stream.synchronize()
 
-    def _postprocess_masks_gpu(self, conf_thres=0.25, iou_thres=0.7):
+    def _postprocess_masks_gpu(self, conf_thres=0.25, iou_thres=0.55):
         """NMS + mask decode on GPU. Returns torch tensor (N, 128, 128) on CUDA, or None."""
         pred = self._output0[0].T  # (5376, 37) on GPU
         protos = self._output1[0]  # (32, 128, 128) on GPU
@@ -168,7 +168,7 @@ class FastSAMTRT:
         masks_sigmoid = torch.sigmoid(masks_raw)  # sigmoid on GPU
         return masks_sigmoid.reshape(-1, 128, 128)
 
-    def _postprocess_gpu(self, conf_thres=0.25, iou_thres=0.7):
+    def _postprocess_gpu(self, conf_thres=0.25, iou_thres=0.55):
         """NMS + mask decode using torch on GPU. Returns masks (N, 128, 128) numpy float32."""
         masks = self._postprocess_masks_gpu(conf_thres, iou_thres)
         if masks is None:
@@ -245,14 +245,10 @@ class FastSAMTRT:
             # Threshold to binary
             masks_bin = (masks_full > 0.5).float()
 
-            # GPU morphological close then open — fills gaps, removes small fragments
+            # GPU morphological close — fills small holes in masks
             masks_4d = masks_bin.unsqueeze(1)  # (k, 1, h, w)
-            # Close (dilate→erode): fills small holes
-            masks_4d = torch.nn.functional.max_pool2d(masks_4d, 7, stride=1, padding=3)
-            masks_4d = -torch.nn.functional.max_pool2d(-masks_4d, 7, stride=1, padding=3)
-            # Open (erode→dilate): removes disconnected fragments
-            masks_4d = -torch.nn.functional.max_pool2d(-masks_4d, 11, stride=1, padding=5)
-            masks_4d = torch.nn.functional.max_pool2d(masks_4d, 11, stride=1, padding=5)
+            masks_4d = torch.nn.functional.max_pool2d(masks_4d, 5, stride=1, padding=2)
+            masks_4d = -torch.nn.functional.max_pool2d(-masks_4d, 5, stride=1, padding=2)
             masks_bin = masks_4d.squeeze(1)  # (k, h, w)
 
             # Clean: remove body/person regions

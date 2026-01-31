@@ -75,6 +75,7 @@ class FastSAMSegmenter:
 
         self._cached_segments: list = []
         self._model_path: str = ""
+        self._last_logged_mp_fc: int = -1  # Prevent duplicate person_mask logs
 
     # ------------------------------------------------------------------
     # Initialization
@@ -166,14 +167,16 @@ class FastSAMSegmenter:
 
         self.last_person_mask = person_mask
 
-        # Debug: log person_mask coverage periodically (every ~50 MP frames)
-        if self._mp_worker.frame_count > 0 and self._mp_worker.frame_count % 50 == 0:
+        # Debug: log person_mask coverage once per MP update (every ~50 MP frames)
+        mp_fc = self._mp_worker.frame_count
+        if mp_fc > 0 and mp_fc % 50 == 0 and mp_fc != self._last_logged_mp_fc:
+            self._last_logged_mp_fc = mp_fc
             if person_mask is not None:
                 coverage = float(np.count_nonzero(person_mask > 0.5)) / max(1, h * w)
                 n_body = len([m for m, _, _ in body_masks if m is not None])
-                logger.info(f"person_mask: {coverage*100:.0f}% of frame, {n_body} body parts, mp_fc={self._mp_worker.frame_count}")
+                logger.info(f"person_mask: {coverage*100:.0f}% of frame, {n_body} body parts, mp_fc={mp_fc}")
             else:
-                logger.info(f"person_mask: None, mp_fc={self._mp_worker.frame_count}")
+                logger.info(f"person_mask: None, mp_fc={mp_fc}")
 
         # Run FastSAM + post-processing on contrast-enhanced frame
         masks_out = self._update_masks(frame_enhanced, h, w, body_masks, person_mask, sam_conf)
@@ -245,10 +248,13 @@ class FastSAMSegmenter:
                     bbox = cv2.boundingRect(bm_u8)
                     masks.append((bm_u8, label, center, bbox))
 
-        # Build used_pixels from person silhouette (exclusion zone for SAM)
+        # Build used_pixels from specific body parts only (not full silhouette).
+        # Using person_mask as exclusion hides objects held by the person (bottle, phone).
+        # Body part masks are small enough to exclude without losing held objects.
         used_pixels = np.zeros((h, w), dtype=bool)
-        if person_mask is not None:
-            used_pixels |= (person_mask > 0.5)
+        for body_mask, _, _ in body_masks:
+            if body_mask is not None:
+                used_pixels |= (body_mask > 0.5)
 
         sam_conf = sam_conf_override if sam_conf_override is not None else self.config.fastsam_conf
 
@@ -257,7 +263,7 @@ class FastSAMSegmenter:
                 # GPU-accelerated path: infer + resize + filter all on GPU
                 results = self._sam.process_full(
                     frame, h, w, used_pixels,
-                    conf=sam_conf, max_masks=5,
+                    conf=sam_conf, max_masks=8,
                     min_area=self.config.mask_min_area,
                 )
                 self._labeler.reset_frame()
@@ -398,3 +404,5 @@ def _mask_center(mask: np.ndarray) -> tuple[int, int]:
     """Compute mask centroid."""
     mask_u8 = (mask > 0.5).astype(np.uint8) * 255
     return _fast_center(mask_u8)
+
+

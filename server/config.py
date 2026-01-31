@@ -17,7 +17,7 @@ class ServerConfig:
 
     # FastSAM (matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
-    fastsam_conf: float = 0.35           # balance: catch objects without spam
+    fastsam_conf: float = 0.50           # higher = fewer fragments on textured objects (paintings/screens)
     fastsam_imgsz: int = 512            # matches original adaptive max (was 320)
     fastsam_device: str = "cuda"
 
@@ -33,7 +33,7 @@ class ServerConfig:
     gemini_label_cache_ttl: float = 30.0  # seconds
 
     # Mask refinement
-    mask_min_area: int = 2000           # minimum pixel count to keep a SAM segment
+    mask_min_area: int = 4000           # minimum pixel count — suppresses small fragments of textured objects
     mask_refine_grabcut: bool = False   # OFF — GrabCut adds ~400ms per mask, too slow for realtime
 
     # Emotion detection

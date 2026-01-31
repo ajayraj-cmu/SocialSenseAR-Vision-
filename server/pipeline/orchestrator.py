@@ -526,8 +526,25 @@ class PipelineOrchestrator:
                 track["center_x"] = seg.center_x
                 track["center_y"] = seg.center_y
                 track["area"] = seg_areas[si]
-                track["seg"] = seg
                 track["last_seen"] = now
+
+                # Temporal mask smoothing — keep old mask if shape is similar.
+                # Prevents outline jitter on paintings/screens where SAM produces
+                # slightly different masks each frame.
+                old_seg = track.get("seg")
+                if old_seg is not None and old_seg.mask is not None and seg.mask is not None:
+                    old_m = old_seg.mask
+                    new_m = seg.mask
+                    if old_m.shape == new_m.shape:
+                        old_b = old_m > 127 if old_m.dtype == np.uint8 else old_m > 0.5
+                        new_b = new_m > 127 if new_m.dtype == np.uint8 else new_m > 0.5
+                        inter = np.count_nonzero(old_b & new_b)
+                        union = np.count_nonzero(old_b | new_b)
+                        iou = inter / max(1, union)
+                        if iou > 0.65:
+                            # Shapes are similar — keep old mask (stable outline)
+                            seg.mask = old_seg.mask
+                track["seg"] = seg
                 # Only set label if track has no confirmed label yet.
                 # Gemini (_background_label) is the authority for label updates.
                 if not track.get("label") or track["label"].startswith("~"):
