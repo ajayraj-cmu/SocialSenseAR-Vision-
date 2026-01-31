@@ -141,6 +141,7 @@ class FastSAMSegmenter:
         # ============================================================
         t_mp = time.perf_counter()
         body_masks, person_mask = self._mp_detector.detect(frame_bgr, rgb, h, w)
+        self.last_person_mask = person_mask  # Expose for pipeline person-awareness
         mp_ms = (time.perf_counter() - t_mp) * 1000
 
         # ============================================================
@@ -194,6 +195,12 @@ class FastSAMSegmenter:
         # ==========================================
         t_sam = time.perf_counter()
         used_pixels = np.zeros((h, w), dtype=bool)
+
+        # Mark body-part pixels as used so SAM doesn't duplicate them
+        for body_mask, _, _ in body_masks:
+            if body_mask is not None:
+                used_pixels |= (body_mask > 0.5)
+
         try:
             sam_conf = sam_conf_override if sam_conf_override is not None else self.config.fastsam_conf
 
@@ -227,7 +234,7 @@ class FastSAMSegmenter:
                     # Remove overlap
                     clean_mask = mask_binary & ~used_pixels
 
-                    if np.sum(clean_mask) < 500:
+                    if np.sum(clean_mask) < 1500:
                         continue
 
                     # ==========================================
@@ -235,7 +242,10 @@ class FastSAMSegmenter:
                     # ==========================================
                     t_ref = time.perf_counter()
                     clean_mask_float = clean_mask.astype(np.float32)
-                    refined_mask = refine_mask_edges(frame, clean_mask_float)
+                    refined_mask = refine_mask_edges(
+                        frame, clean_mask_float,
+                        use_grabcut=self.config.mask_refine_grabcut,
+                    )
 
                     # Ensure refined mask is valid
                     if refined_mask is not None and np.sum(refined_mask > 0.5) >= 500:

@@ -98,14 +98,24 @@ BRIGHT_COLORS = [
 ]
 
 
-def draw_overlay_fast(frame, resp, debug_mode: bool):
-    """Draw segment overlays matching sam_gemini_voice.py visual style.
+def _rects_overlap(rect, placed):
+    """Check if rect overlaps any already-placed label rectangle."""
+    x1, y1, x2, y2 = rect
+    for px1, py1, px2, py2 in placed:
+        if x1 < px2 and x2 > px1 and y1 < py2 and y2 > py1:
+            return True
+    return False
 
-    Always shows all segments with contour outlines + labels at centers.
-    debug_mode=False (default): contour outlines + center labels (like original).
+
+def draw_overlay_fast(frame, resp, debug_mode: bool):
+    """Draw segment overlays with contour outlines + labels.
+
+    Labels are nudged upward to avoid overlapping each other.
+    debug_mode=False (default): contour outlines + center labels.
     debug_mode=True  (press P): adds bounding boxes + detailed label info.
     """
     h, w = frame.shape[:2]
+    placed_rects = []  # Track placed label positions to avoid overlap
 
     for i, seg in enumerate(resp.segments):
         if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
@@ -127,30 +137,46 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
         is_pending = label.startswith("~")
         display_label = label.lstrip("~") if is_pending else label
 
-        # Border color + width (matches original logic)
+        # Border color + width
         border_color = BRIGHT_COLORS[i % len(BRIGHT_COLORS)]
         border_width = 2
 
         # Draw contour outlines
         cv2.drawContours(frame, contours, -1, border_color, border_width)
 
-        # Draw label at segment center
+        # Draw label at segment center with collision avoidance
         if display_label:
             cx = int(seg.center_x * w)
             cy = int(seg.center_y * h)
 
             if is_pending:
-                # Pending labels: smaller, dimmer (matches original)
-                (tw, th), _ = cv2.getTextSize(display_label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-                cv2.rectangle(frame, (cx - 2, cy - th - 2), (cx + tw + 2, cy + 2), (50, 50, 50), -1)
-                cv2.putText(frame, display_label, (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+                font_scale, thickness = 0.35, 1
+                text_color = (150, 150, 150)
+                bg_color = (50, 50, 50)
+                pad = 2
             else:
-                # Confirmed labels: bright text on black background
-                (tw, th), _ = cv2.getTextSize(display_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(frame, (cx - 3, cy - th - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
-                cv2.putText(frame, display_label, (cx, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, border_color, 1)
+                font_scale, thickness = 0.5, 1
+                text_color = border_color
+                bg_color = (0, 0, 0)
+                pad = 3
+
+            (tw, th), _ = cv2.getTextSize(display_label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+            # Nudge label upward if it overlaps an existing label
+            cy_draw = cy
+            for _ in range(5):
+                label_rect = (cx - pad, cy_draw - th - pad, cx + tw + pad, cy_draw + pad)
+                if not _rects_overlap(label_rect, placed_rects):
+                    break
+                cy_draw -= (th + pad * 2 + 2)
+            else:
+                label_rect = (cx - pad, cy_draw - th - pad, cx + tw + pad, cy_draw + pad)
+
+            placed_rects.append(label_rect)
+            cv2.rectangle(frame, (label_rect[0], label_rect[1]),
+                         (label_rect[2], label_rect[3]), bg_color, -1)
+            cv2.putText(frame, display_label, (cx, cy_draw),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
 
         # Debug mode: bounding boxes + detailed info
         if debug_mode:
@@ -291,8 +317,12 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         continue
                     last_sent_fid = fid
 
+                    # Flip vertically to match Quest frame orientation
+                    # (server expects flipped frames and corrects them)
+                    frame_send = cv2.flip(frame, 0)
+
                     # Encode JPEG
-                    _, jpeg = cv2.imencode(".jpg", frame, encode_params)
+                    _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
 
                     # Build protobuf
                     msg = pb.ClientMessage()

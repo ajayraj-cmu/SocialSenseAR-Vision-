@@ -15,7 +15,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def refine_mask_edges(frame: np.ndarray, mask: np.ndarray, iterations: int = 2) -> np.ndarray | None:
+def refine_mask_edges(frame: np.ndarray, mask: np.ndarray, use_grabcut: bool = True) -> np.ndarray | None:
     """Refine mask edges using bilateral filtering and morphological operations.
 
     Exact copy from sam_gemini_voice.py line 3180.
@@ -23,7 +23,7 @@ def refine_mask_edges(frame: np.ndarray, mask: np.ndarray, iterations: int = 2) 
     Args:
         frame: BGR uint8 image.
         mask: float32 mask (0.0-1.0).
-        iterations: unused (kept for API compat with original).
+        use_grabcut: Whether to run GrabCut refinement (expensive, ~400ms per mask).
 
     Returns:
         Refined float32 mask, or None on failure.
@@ -47,10 +47,12 @@ def refine_mask_edges(frame: np.ndarray, mask: np.ndarray, iterations: int = 2) 
         mask_closed = cv2.morphologyEx(mask_opened, cv2.MORPH_CLOSE, kernel)
         morph_ms = (time.perf_counter() - t_morph) * 1000
 
-        # GrabCut refinement
-        t_gc = time.perf_counter()
-        mask_refined = _grabcut_refinement(frame, mask_closed)
-        grabcut_ms = (time.perf_counter() - t_gc) * 1000
+        # GrabCut refinement (optional — ~400ms per mask, too slow for realtime)
+        grabcut_ms = 0.0
+        if use_grabcut:
+            t_gc = time.perf_counter()
+            mask_closed = _grabcut_refinement(frame, mask_closed)
+            grabcut_ms = (time.perf_counter() - t_gc) * 1000
 
         total_ms = (time.perf_counter() - t0) * 1000
         logger.debug(
@@ -58,7 +60,7 @@ def refine_mask_edges(frame: np.ndarray, mask: np.ndarray, iterations: int = 2) 
             f"grabcut={grabcut_ms:.1f}ms total={total_ms:.1f}ms"
         )
 
-        return mask_refined.astype(np.float32) / 255.0
+        return mask_closed.astype(np.float32) / 255.0
 
     except Exception:
         return None

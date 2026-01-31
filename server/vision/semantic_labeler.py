@@ -7,9 +7,7 @@ Every threshold and heuristic path is identical to the original.
 SAFE TO EDIT: Changes here only affect label text/asset_class, not masks or protobuf format.
 """
 
-import time
 import logging
-import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -39,132 +37,38 @@ class SemanticLabeler:
     # ------------------------------------------------------------------
 
     def get_label(self, mask: np.ndarray, h: int, w: int, frame: np.ndarray = None) -> tuple[str, None]:
-        """Semantic labeling heuristic.
+        """Semantic labeling heuristic — conservative, short labels.
 
-        Args:
-            mask: float32 mask.
-            h, w: frame dimensions.
-            frame: BGR image (for window brightness check).
+        Only confidently labels very large structural elements touching
+        frame edges. Everything else returns "object" and waits for Gemini.
 
         Returns:
-            (label, None) — second element kept for API compat with original.
+            (label, None) — second element kept for API compat.
         """
-        t0 = time.perf_counter()
-
         ys, xs = np.where(mask > 0.5)
 
         if len(ys) == 0:
-            return "area", None
+            return "object", None
 
-        cy = np.mean(ys)
-        cx = np.mean(xs)
-        area = len(ys)
-        total_area = h * w
-        area_ratio = area / total_area
+        area_ratio = len(ys) / (h * w)
+        cy_norm = float(np.mean(ys)) / h
 
-        # Region key for label persistence
-        region_key = self.get_region_key(cx, cy, area, h, w)
+        touches_top = np.any(ys < h * 0.03)
+        touches_bottom = np.any(ys > h * 0.97)
+        touches_left = np.any(xs < w * 0.03)
+        touches_right = np.any(xs > w * 0.97)
+        edge_count = sum([touches_top, touches_bottom, touches_left, touches_right])
 
-        # ============================================
-        # Semantic labeling for structures — exact same as original
-        # ============================================
+        # Only label structural for very large segments touching frame edges
+        if area_ratio > 0.20 and edge_count >= 2:
+            if cy_norm < 0.35:
+                return "ceiling", None
+            if cy_norm > 0.65:
+                return "floor", None
+            return "wall", None
 
-        bbox_h = ys.max() - ys.min() if len(ys) > 0 else 0
-        bbox_w = xs.max() - xs.min() if len(xs) > 0 else 0
-        aspect = bbox_w / (bbox_h + 1) if bbox_h > 0 else 1
-
-        touches_top = np.any(ys < h * 0.05)
-        touches_bottom = np.any(ys > h * 0.95)
-        touches_left = np.any(xs < w * 0.05)
-        touches_right = np.any(xs > w * 0.05)
-
-        label = None
-
-        # Very large areas = structural
-        if area_ratio > 0.12:
-            if touches_top and cy < h * 0.4:
-                label = "ceiling"
-            elif touches_bottom and cy > h * 0.6:
-                label = "floor"
-            elif (touches_left or touches_right) and area_ratio > 0.08:
-                label = "wall"
-            elif cy < h * 0.35:
-                label = "ceiling"
-            elif cy > h * 0.65:
-                label = "floor"
-            else:
-                label = "wall"
-
-        # Doors
-        if label is None and 0.05 < area_ratio < 0.15:
-            if aspect < 0.7 and (touches_left or touches_right or touches_bottom):
-                if 0.3 < cy / h < 0.8:
-                    label = "door"
-
-        # Windows
-        if label is None and 0.03 < area_ratio < 0.12 and 0.25 < cy / h < 0.75:
-            if 1.2 < aspect < 3.5:
-                if frame is not None:
-                    try:
-                        mask_region = frame[int(ys.min()):int(ys.max()), int(xs.min()):int(xs.max())]
-                        if len(mask_region) > 0:
-                            gray = cv2.cvtColor(mask_region, cv2.COLOR_BGR2GRAY)
-                            brightness = np.mean(gray)
-                            if brightness > 80:
-                                label = "window"
-                    except Exception:
-                        pass
-                if label is None:
-                    label = "window"
-
-        # Medium areas — furniture
-        if label is None and area_ratio > 0.03:
-            bbox_h2 = ys.max() - ys.min()
-            bbox_w2 = xs.max() - xs.min()
-            aspect2 = bbox_w2 / (bbox_h2 + 1)
-
-            if cy > h * 0.55:
-                if aspect2 > 2:
-                    label = "table"
-                elif aspect2 < 0.5:
-                    label = "cabinet"
-                else:
-                    label = "furniture"
-            elif cy < h * 0.4:
-                if aspect2 > 1.5:
-                    label = "shelf"
-                else:
-                    label = "cabinet"
-            else:
-                if aspect2 > 2:
-                    label = "monitor"
-                else:
-                    label = "furniture"
-
-        # Small objects
-        if label is None and area_ratio > 0.005:
-            bbox_h3 = ys.max() - ys.min()
-            bbox_w3 = xs.max() - xs.min()
-            aspect3 = bbox_w3 / (bbox_h3 + 1)
-
-            if aspect3 > 1.5:
-                label = "item_wide"
-            elif aspect3 < 0.7:
-                label = "item_tall"
-            else:
-                label = "item"
-
-        if label is None:
-            label = "small_item"
-
-        label_ms = (time.perf_counter() - t0) * 1000
-        logger.debug(
-            f"Label: '{label}' for region {region_key} "
-            f"(area={area_ratio:.1%}, aspect={aspect:.1f}, cy={cy/h:.2f}) "
-            f"in {label_ms:.2f}ms"
-        )
-
-        return label, None
+        # Everything else — pending Gemini (~ prefix = unconfirmed)
+        return "~object", None
 
     # ------------------------------------------------------------------
     # Unique label — exact copy from sam_gemini_voice.py line 2379
@@ -177,7 +81,7 @@ class SemanticLabeler:
             return label
         else:
             self.label_counts[label] += 1
-            return f"{label}_{self.label_counts[label]}"
+            return f"{label}{self.label_counts[label]}"
 
     # ------------------------------------------------------------------
     # Region key — exact copy from sam_gemini_voice.py line 2392

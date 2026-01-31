@@ -41,6 +41,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-emotion", action="store_true", help="Disable emotion detection")
     parser.add_argument("--stub", action="store_true",
                         help="Run with stub pipeline (no ML models, for testing)")
+    parser.add_argument("--debug-view", action="store_true",
+                        help="Show Quest camera feed with mask overlays in a window")
+    parser.add_argument("--metrics-log", type=str, default=None,
+                        help="Path to JSONL file for structured metrics output")
     return parser.parse_args()
 
 
@@ -67,6 +71,8 @@ def main():
         fastsam_device=args.device,
         audio_enabled=not args.no_audio,
         emotion_enabled=not args.no_emotion,
+        debug_view=args.debug_view,
+        metrics_log_path=args.metrics_log,
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
     )

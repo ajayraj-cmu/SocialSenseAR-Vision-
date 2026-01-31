@@ -19,6 +19,7 @@ Interface expected by websocket_server.py:
 """
 
 import time
+import json
 import logging
 import threading
 import cv2
@@ -64,18 +65,20 @@ class PipelineOrchestrator:
         self._sam_stop = threading.Event()
         self._sam_count = 0
 
-        # --- Gemini labeling (background, every 3s) ---
-        self._gemini_interval = 3.0
+        # --- Gemini labeling (background, every 2s) ---
+        self._gemini_interval = 2.0
         self._last_gemini_time = 0.0
 
-        # --- Tracked masks with velocity prediction ---
+        # --- Tracked masks (position-based matching, no velocity) ---
         self._tracks: dict[str, dict] = {}
         self._next_track_id = 0
-        self._max_frames_missing = 15
-        self._velocity_smoothing = 0.3
+        self._max_frames_missing = 3  # ~1.5s at 2fps SAM
 
         # --- Cached output (returned on every frame) ---
         self._cached_result: PipelineResult | None = None
+
+        # --- Person mask (from MediaPipe, for Gemini person-awareness) ---
+        self._person_mask: np.ndarray | None = None
 
         # --- Frame dimensions (cached from last decode) ---
         self._fw = 0
@@ -86,6 +89,15 @@ class PipelineOrchestrator:
 
         self._frame_count = 0
         self._initialized = False
+
+        # Structured metrics log (JSONL)
+        self._metrics_log = None
+        if config.metrics_log_path:
+            try:
+                self._metrics_log = open(config.metrics_log_path, "a")
+                logger.info(f"Metrics logging to {config.metrics_log_path}")
+            except Exception as e:
+                logger.warning(f"Cannot open metrics log: {e}")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -122,6 +134,9 @@ class PipelineOrchestrator:
             self._sam_thread.join(timeout=5)
         self._segmenter.shutdown()
         self._labeler.shutdown()
+        if self._metrics_log:
+            self._metrics_log.close()
+            self._metrics_log = None
         self._initialized = False
         logger.info("Pipeline shut down")
 
@@ -176,6 +191,8 @@ class PipelineOrchestrator:
         frame_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame_bgr is None:
             return None, 0, 0
+        # Quest client sends vertically flipped frames — correct here
+        frame_bgr = cv2.flip(frame_bgr, 0)
         fh, fw = frame_bgr.shape[:2]
         if (fw, fh) != (width, height) and width > 0 and height > 0:
             frame_bgr = cv2.resize(frame_bgr, (width, height))
@@ -197,13 +214,14 @@ class PipelineOrchestrator:
         new_segments = self._segmenter.segment_frame(frame_bgr)
         result.fastsam_ms = (time.perf_counter() - t1) * 1000
         self._sam_count = 1
+        self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
         # Kick Gemini
         now = time.time()
         self._last_gemini_time = now
         threading.Thread(
             target=self._background_label,
-            args=(frame_bgr.copy(), list(new_segments)),
+            args=(frame_bgr.copy(), list(new_segments), self._person_mask),
             daemon=True,
         ).start()
 
@@ -263,6 +281,7 @@ class PipelineOrchestrator:
                 new_segments = self._segmenter.segment_frame(frame_bgr)
                 sam_ms = (time.perf_counter() - t0) * 1000
                 self._sam_count += 1
+                self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
                 # 3. Kick Gemini if due
                 now = time.time()
@@ -270,7 +289,7 @@ class PipelineOrchestrator:
                     self._last_gemini_time = now
                     threading.Thread(
                         target=self._background_label,
-                        args=(frame_bgr.copy(), list(new_segments)),
+                        args=(frame_bgr.copy(), list(new_segments), self._person_mask),
                         daemon=True,
                     ).start()
 
@@ -295,6 +314,23 @@ class PipelineOrchestrator:
                         f"SAM #{self._sam_count}: {total_ms:.0f}ms total "
                         f"({sam_ms:.0f}ms SAM), {len(tracked)} segs"
                     )
+
+                # Write structured metrics
+                if self._metrics_log:
+                    try:
+                        labels = [s.label or "" for s in tracked]
+                        metric = {
+                            "ts": time.time(),
+                            "sam_count": self._sam_count,
+                            "sam_ms": round(sam_ms, 1),
+                            "total_ms": round(total_ms, 1),
+                            "segs": len(tracked),
+                            "labels": labels,
+                        }
+                        self._metrics_log.write(json.dumps(metric) + "\n")
+                        self._metrics_log.flush()
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.error(f"SAM loop error: {e}", exc_info=True)
@@ -321,17 +357,17 @@ class PipelineOrchestrator:
     # Background Gemini labeling
     # ------------------------------------------------------------------
 
-    def _background_label(self, frame_bgr: np.ndarray, segments: list):
+    def _background_label(self, frame_bgr: np.ndarray, segments: list, person_mask=None):
         """Run Gemini labeling, then propagate labels to tracks by position."""
         try:
-            labelled = self._labeler.label_segments(frame_bgr, segments)
+            labelled = self._labeler.label_segments(frame_bgr, segments, person_mask=person_mask)
 
             # Apply labels directly to tracks (matched by position)
             for seg in labelled:
                 if not seg.label or seg.label.startswith("~"):
                     continue
                 best_tid = None
-                best_dist = 0.15
+                best_dist = 0.25
                 for tid, track in self._tracks.items():
                     dx = seg.center_x - track["center_x"]
                     dy = seg.center_y - track["center_y"]
@@ -348,30 +384,25 @@ class PipelineOrchestrator:
             logger.warning(f"Background labeling error: {e}")
 
     # ------------------------------------------------------------------
-    # Tracked masks with velocity prediction
+    # Tracked masks (position-based matching, no velocity)
     # ------------------------------------------------------------------
 
     def _update_tracks(self, segments: list, now: float, h: int, w: int):
-        """Match new segments to existing tracks, update velocity."""
+        """Match new segments to existing tracks by centroid distance."""
         matched_track_ids = set()
-        matched_seg_idxs = set()
 
         for seg_idx, seg in enumerate(segments):
-            best_dist = 0.15
+            best_dist = 0.25  # 25% of frame — tolerates moderate movement between SAM frames
             best_tid = None
 
             for tid, track in self._tracks.items():
                 if tid in matched_track_ids:
                     continue
-                dt = now - track["last_seen"]
-                vx, vy = track["velocity"]
-                pred_x = track["center_x"] + vx * dt
-                pred_y = track["center_y"] + vy * dt
-
-                dx = seg.center_x - pred_x
-                dy = seg.center_y - pred_y
+                dx = seg.center_x - track["center_x"]
+                dy = seg.center_y - track["center_y"]
                 dist = (dx * dx + dy * dy) ** 0.5
 
+                # Prefer matching same label
                 if seg.label and track["label"] and seg.label == track["label"]:
                     dist *= 0.5
 
@@ -381,14 +412,6 @@ class PipelineOrchestrator:
 
             if best_tid is not None:
                 track = self._tracks[best_tid]
-                dt = max(now - track["last_seen"], 0.001)
-                new_vx = (seg.center_x - track["center_x"]) / dt
-                new_vy = (seg.center_y - track["center_y"]) / dt
-                alpha = self._velocity_smoothing
-                track["velocity"] = (
-                    track["velocity"][0] * (1 - alpha) + new_vx * alpha,
-                    track["velocity"][1] * (1 - alpha) + new_vy * alpha,
-                )
                 track["center_x"] = seg.center_x
                 track["center_y"] = seg.center_y
                 track["seg"] = seg
@@ -400,7 +423,6 @@ class PipelineOrchestrator:
 
                 seg.track_id = best_tid
                 matched_track_ids.add(best_tid)
-                matched_seg_idxs.add(seg_idx)
             else:
                 tid = f"seg_{self._next_track_id}"
                 self._next_track_id += 1
@@ -409,14 +431,12 @@ class PipelineOrchestrator:
                     "seg": seg,
                     "center_x": seg.center_x,
                     "center_y": seg.center_y,
-                    "velocity": (0.0, 0.0),
                     "last_seen": now,
                     "frames_missing": 0,
                     "label": seg.label,
                     "asset_class": seg.asset_class,
                 }
                 matched_track_ids.add(tid)
-                matched_seg_idxs.add(seg_idx)
 
         dead_ids = []
         for tid, track in self._tracks.items():
@@ -429,27 +449,13 @@ class PipelineOrchestrator:
             del self._tracks[tid]
 
     def _get_tracked_output(self, now: float, h: int, w: int) -> list:
-        """Build output segment list including interpolated missing tracks."""
+        """Build output segment list from tracked segments (no interpolation)."""
         output: list[SegmentData] = []
 
         for tid, track in self._tracks.items():
             seg = track["seg"]
 
-            if track["frames_missing"] > 0:
-                dt = now - track["last_seen"]
-                vx, vy = track["velocity"]
-                shift_x = int(vx * w * dt)
-                shift_y = int(vy * h * dt)
-
-                if abs(shift_x) < 50 and abs(shift_y) < 50 and seg.mask is not None:
-                    M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-                    shifted = cv2.warpAffine(
-                        (seg.mask * 255).astype(np.uint8), M, (w, h)
-                    )
-                    seg.mask = shifted.astype(np.float32) / 255.0
-                    seg.center_x = track["center_x"] + vx * dt
-                    seg.center_y = track["center_y"] + vy * dt
-
+            # Apply cached labels from Gemini
             if track["label"] and not track["label"].startswith("~"):
                 seg.label = track["label"]
                 seg.asset_class = track["asset_class"]

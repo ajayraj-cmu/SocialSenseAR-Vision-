@@ -17,7 +17,7 @@ class ServerConfig:
 
     # FastSAM (matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
-    fastsam_conf: float = 0.3           # matches original (was 0.25)
+    fastsam_conf: float = 0.25          # balance: detect background objects without spam
     fastsam_imgsz: int = 512            # matches original adaptive max (was 320)
     fastsam_device: str = "cuda"
 
@@ -33,8 +33,8 @@ class ServerConfig:
     gemini_label_cache_ttl: float = 30.0  # seconds
 
     # Mask refinement
-    mask_min_area: int = 500            # minimum pixel area
-    mask_refine_grabcut: bool = True    # ON — matches original (bilateral + GrabCut)
+    mask_min_area: int = 1500           # minimum pixel count to keep a SAM segment
+    mask_refine_grabcut: bool = False   # OFF — GrabCut adds ~400ms per mask, too slow for realtime
 
     # Emotion detection
     emotion_enabled: bool = True
@@ -47,6 +47,10 @@ class ServerConfig:
 
     # OpenAI
     openai_summary_model: str = "gpt-4o-mini"
+
+    # Debug
+    debug_view: bool = False  # Show Quest camera feed + overlays in cv2 window
+    metrics_log_path: Optional[str] = None  # JSONL file for structured metrics
 
     # Env vars (loaded at runtime)
     openai_api_key: Optional[str] = None

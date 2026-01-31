@@ -34,6 +34,7 @@ class SocialSenseServer:
 
         # Cached serialized response (reused when segments haven't changed)
         self._cached_response_bytes: bytes = b""
+        self._cached_response = None  # pb.ServerMessage for debug view
         self._cached_segments_id: int = 0  # id() of the segments list
 
     async def run(self):
@@ -59,6 +60,7 @@ class SocialSenseServer:
         self._frame_count = 0
         self._start_time = time.time()
         self._cached_response_bytes = b""
+        self._cached_response = None
         self._cached_segments_id = 0
 
         try:
@@ -126,6 +128,9 @@ class SocialSenseServer:
                     f"Frame {self._frame_count}: {wall_ms:.1f}ms wall (cached), "
                     f"{fps:.1f} fps"
                 )
+            # Show live feed even for cached frames (every 3rd frame to stay smooth)
+            if self.config.debug_view and self._frame_count % 3 == 0 and self._cached_response:
+                self._show_debug_view(msg.frame.jpeg_data, self._cached_response)
             return self._cached_response_bytes
 
         # Segments changed — rebuild protobuf response
@@ -178,6 +183,7 @@ class SocialSenseServer:
         # Serialize and cache
         response_bytes = response.SerializeToString()
         self._cached_response_bytes = response_bytes
+        self._cached_response = response
         self._cached_segments_id = seg_id
 
         if self._frame_count % 60 == 0 or self._frame_count <= 2:
@@ -189,7 +195,52 @@ class SocialSenseServer:
                 f"{len(response.segments)} segs, {fps:.1f} fps"
             )
 
+        if self.config.debug_view:
+            self._show_debug_view(msg.frame.jpeg_data, response)
+
         return response_bytes
+
+    _BRIGHT_COLORS = [
+        (0, 255, 255), (255, 0, 255), (0, 255, 0), (255, 255, 0),
+        (255, 128, 0), (128, 0, 255), (0, 128, 255), (255, 0, 128),
+        (255, 255, 255), (100, 255, 200),
+    ]
+
+    def _show_debug_view(self, jpeg_data: bytes, response: pb.ServerMessage):
+        """Decode Quest frame and draw mask overlays in a cv2 window."""
+        import numpy as np
+        import cv2
+        from server.encoding.rle import decode_rle
+
+        buf = np.frombuffer(jpeg_data, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return
+        frame = cv2.flip(frame, 0)
+
+        h, w = frame.shape[:2]
+        for i, seg in enumerate(response.segments):
+            if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
+                continue
+            mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
+            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
+            color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
+            cv2.drawContours(frame, contours, -1, color, 2)
+            label = seg.label or seg.asset_class or ""
+            if label:
+                cx = int(seg.center_x * w)
+                cy = int(seg.center_y * h)
+                (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(frame, (cx - 3, cy - th_ - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
+                cv2.putText(frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        cv2.imshow("Quest Debug View", frame)
+        cv2.waitKey(1)
 
     def _empty_response(self, frame_id: int) -> bytes:
         response = pb.ServerMessage()

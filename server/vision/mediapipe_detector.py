@@ -181,15 +181,8 @@ class MediaPipeDetector:
         self.frame_count += 1
         selfie_ms = (time.perf_counter() - t_selfie) * 1000
 
-        # ============================================================
-        # Person mask segment
-        # ============================================================
-        if self.person_mask is not None and np.any(self.person_mask > 0.5):
-            pm = self.person_mask.copy()
-            if pm.shape != (h, w):
-                pm = cv2.resize(pm, (w, h))
-            center = _mask_center(pm)
-            masks.append((pm, "person", center))
+        # Person mask is used for SAM exclusion and person-awareness,
+        # but NOT added as a display segment (it overlaps all other body parts).
 
         # ============================================================
         # Face from FaceLandmarker
