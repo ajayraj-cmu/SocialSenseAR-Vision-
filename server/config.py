@@ -48,7 +48,7 @@ class ServerConfig:
     gemini_label_cache_ttl: float = 30.0  # seconds
 
     # Mask refinement
-    mask_min_area: int = 500            # minimum pixel count — suppresses small fragments
+    mask_min_area: int = 300            # minimum pixel count — suppresses small fragments
     mask_refine_grabcut: bool = False   # OFF — GrabCut adds ~400ms per mask, too slow for realtime
 
     # Emotion detection

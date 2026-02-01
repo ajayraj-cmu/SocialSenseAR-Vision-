@@ -5,19 +5,26 @@ Architecture:
   sender loop          -> encodes JPEG + sends protobuf (fire-and-forget)
   receiver() task      -> collects server responses, tracks round-trip latency
   display (optional)   -> cv2 overlay with latest response
+  CommandInput thread  -> reads console commands (blur face, etc.)
 
-This mirrors how the Quest headset works: send frames as fast as the
-camera produces them, process responses asynchronously.
+Commands (type in console or speak via Whisper):
+    blur <object>       — blur person, face, wall, etc.
+    unblur <object>     — stop blurring that object
+    <object> blur       — same as "blur <object>"
+    clear               — remove all blur effects
+    list                — show active blur targets
+    help                — show available commands
 
 Usage:
     python -m server.main --device cuda
-    python -m server.test_client
-    python -m server.test_client --url ws://localhost:8765 --fps 30 --show
+    python -m server.test_client --show
+    python -m server.test_client --show --whisper   # enable voice commands
 """
 
 import asyncio
 import argparse
 import collections
+import queue
 import threading
 import time
 import sys
@@ -34,6 +41,208 @@ import websockets
 sys.path.insert(0, ".")
 from server.proto import socialsense_pb2 as pb
 from server.encoding.rle import decode_rle
+
+# Known object labels that SAM3 can detect
+KNOWN_LABELS = {
+    "person", "face", "chair", "table", "desk", "couch", "monitor",
+    "laptop", "lamp", "wall", "floor", "door", "window",
+    "head", "hair", "torso", "body", "shirt", "arm", "hand",
+    "shoulder", "skin", "pants", "leg", "human",
+}
+
+# Aliases: map common words to SAM3 labels
+LABEL_ALIASES = {
+    "computer": "monitor", "screen": "monitor", "display": "monitor",
+    "sofa": "couch", "settee": "couch",
+    "light": "lamp", "ceiling light": "lamp",
+    "ground": "floor", "carpet": "floor",
+    "background": "wall",  # blur wall = blur background
+    "people": "person", "human": "person", "man": "person", "woman": "person",
+    "hands": "hand", "arms": "arm", "legs": "leg",
+    "furniture": "chair",  # best effort
+}
+
+
+def parse_command(text: str) -> tuple[str, str | None]:
+    """Parse a command string into (action, target).
+
+    Supports:
+        "blur face"      -> ("blur", "face")
+        "face blur"      -> ("blur", "face")
+        "unblur person"  -> ("unblur", "person")
+        "person unblur"  -> ("unblur", "person")
+        "clear"          -> ("clear", None)
+        "list"           -> ("list", None)
+        "help"           -> ("help", None)
+    """
+    text = text.strip().lower()
+    if not text:
+        return ("", None)
+
+    # Single-word commands
+    if text in ("clear", "reset", "clearall"):
+        return ("clear", None)
+    if text in ("list", "ls", "show", "status"):
+        return ("list", None)
+    if text in ("help", "?", "commands"):
+        return ("help", None)
+
+    words = text.split()
+
+    # Two-word: "blur face" or "face blur"
+    action = None
+    target = None
+    for w in words:
+        if w in ("blur", "blr", "blue"):  # handle typos
+            action = "blur"
+        elif w in ("unblur", "unblr", "remove", "stop", "off"):
+            action = "unblur"
+        else:
+            target = w
+
+    if action is None:
+        # Default: "blur" if just a label name
+        action = "blur"
+        target = text.split()[0]
+
+    if target:
+        # Resolve aliases
+        target = LABEL_ALIASES.get(target, target)
+
+    return (action, target)
+
+
+class CommandInput:
+    """Background thread that reads console commands (stdin)."""
+
+    def __init__(self):
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        while self._running:
+            try:
+                line = input()
+                if line.strip():
+                    self._queue.put(line.strip())
+            except EOFError:
+                break
+            except Exception:
+                break
+
+    def get_commands(self) -> list[str]:
+        """Non-blocking: return all queued commands."""
+        cmds = []
+        while not self._queue.empty():
+            try:
+                cmds.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return cmds
+
+    def stop(self):
+        self._running = False
+
+
+class WhisperInput:
+    """Background thread: listens to microphone, transcribes speech as commands.
+
+    Uses openai-whisper (tiny.en) on CPU so it doesn't contend with SAM on GPU.
+    Requires: pip install openai-whisper sounddevice
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._available = False
+
+    def start(self):
+        try:
+            import whisper  # noqa: F401
+            import sounddevice as sd  # noqa: F401
+            self._available = True
+            self._thread.start()
+            print("Whisper: listening on microphone (tiny.en model)")
+        except ImportError as e:
+            print(f"Whisper unavailable: {e}")
+            print("  Install with: pip install openai-whisper sounddevice")
+            self._available = False
+
+    @property
+    def available(self):
+        return self._available
+
+    def _run(self):
+        import whisper
+        import sounddevice as sd
+
+        model = whisper.load_model("tiny.en", device="cpu")
+        sr = 16000
+        chunk_duration = 0.5  # seconds per recording chunk
+        silence_threshold = 0.015  # RMS energy threshold
+        min_speech_chunks = 2  # minimum ~1s of speech
+        max_speech_chunks = 10  # maximum ~5s
+
+        while self._running:
+            try:
+                audio_chunks = []
+                silence_count = 0
+                recording = False
+
+                # Listen for speech
+                while self._running:
+                    chunk = sd.rec(
+                        int(sr * chunk_duration), samplerate=sr,
+                        channels=1, dtype="float32",
+                    )
+                    sd.wait()
+                    energy = float(np.sqrt(np.mean(chunk ** 2)))
+
+                    if energy > silence_threshold:
+                        audio_chunks.append(chunk)
+                        silence_count = 0
+                        recording = True
+                    elif recording:
+                        silence_count += 1
+                        if silence_count >= 2 or len(audio_chunks) >= max_speech_chunks:
+                            break
+                    # Not recording and no speech — loop back
+
+                if not self._running:
+                    break
+
+                if len(audio_chunks) >= min_speech_chunks:
+                    audio = np.concatenate(audio_chunks).flatten()
+                    result = model.transcribe(
+                        audio, language="en", fp16=False,
+                        no_speech_threshold=0.5,
+                    )
+                    text = result["text"].strip().strip(".")
+                    if text and len(text) > 1:
+                        print(f"  [Whisper] heard: \"{text}\"")
+                        self._queue.put(text)
+
+            except Exception as e:
+                print(f"  [Whisper] error: {e}")
+                time.sleep(1)
+
+    def get_commands(self) -> list[str]:
+        """Non-blocking: return all queued transcriptions."""
+        cmds = []
+        while not self._queue.empty():
+            try:
+                cmds.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return cmds
+
+    def stop(self):
+        self._running = False
 
 
 class FrameGrabber:
@@ -106,6 +315,54 @@ def _rects_overlap(rect, placed):
         if x1 < px2 and x2 > px1 and y1 < py2 and y2 > py1:
             return True
     return False
+
+
+def apply_blur_effects(frame, resp, blur_targets: set[str]):
+    """Apply Gaussian blur to segments matching blur_targets.
+
+    For each segment whose label matches a blur target, blur the masked region.
+    Returns the modified frame.
+    """
+    if not blur_targets or not resp or not resp.segments:
+        return frame
+
+    h, w = frame.shape[:2]
+    # Pre-compute a single heavy blur of the entire frame
+    blurred = cv2.GaussianBlur(frame, (51, 51), 30)
+
+    for seg in resp.segments:
+        if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
+            continue
+
+        label = (seg.label or "").lower().lstrip("~")
+        asset_class = (seg.asset_class or "").lower()
+
+        # Check if this segment matches any blur target
+        matched = False
+        for target in blur_targets:
+            if target == label:
+                matched = True
+                break
+            if target == asset_class:
+                matched = True
+                break
+            # Partial match: "person" matches "left_hand" via asset_class
+            if target in label or label in target:
+                matched = True
+                break
+        if not matched:
+            continue
+
+        # Decode mask and apply blur
+        mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
+        if mask.shape[:2] != (h, w):
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        mask_bool = mask > 128 if mask.dtype == np.uint8 else mask > 0.5
+
+        # Composite: blurred where mask, original elsewhere
+        frame[mask_bool] = blurred[mask_bool]
+
+    return frame
 
 
 def draw_overlay_fast(frame, resp, debug_mode: bool):
@@ -207,7 +464,21 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
     return frame
 
 
-async def run_client(url: str, target_fps: int, show: bool, camera: int):
+def _mask_fingerprint(resp) -> str:
+    """Content fingerprint of segment positions + masks. Ignores frame_id/timestamp."""
+    if not resp or not resp.segments:
+        return ""
+    parts = []
+    for seg in resp.segments:
+        # Position (4 decimal places) + label + first 32 bytes of mask
+        parts.append(f"{seg.center_x:.4f},{seg.center_y:.4f},{seg.label}")
+        if seg.rle_mask:
+            parts.append(seg.rle_mask[:32].hex())
+    return "|".join(parts)
+
+
+async def run_client(url: str, target_fps: int, show: bool, camera: int,
+                     whisper_enabled: bool = False):
     # Check protobuf backend
     try:
         from google.protobuf.internal import api_implementation
@@ -251,6 +522,23 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
             print(f"Connected! Target {target_fps} fps. Ctrl+C or Q to quit.")
             if show:
                 print("  P = toggle debug mode (bounding boxes + detailed labels)")
+            print("Commands (type in console):")
+            print("  blur <object>  — blur person, face, wall, monitor, etc.")
+            print("  unblur <object> — stop blurring that object")
+            print("  clear          — remove all blur effects")
+            print("  list           — show active blur targets")
+            print("  help           — show available labels")
+
+            # --- Command input ---
+            cmd_input = CommandInput()
+            cmd_input.start()
+            whisper_input = None
+            if whisper_enabled:
+                whisper_input = WhisperInput()
+                whisper_input.start()
+
+            # --- Blur state ---
+            blur_targets: set[str] = set()
 
             # --- Shared state ---
             send_count = 0
@@ -281,10 +569,12 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         latest_resp = resp
                         recv_count += 1
 
-                        # Detect actual SAM updates: server sends identical cached
-                        # bytes between SAM cycles, new bytes when SAM produces data.
-                        if raw != last_raw_response:
-                            last_raw_response = raw
+                        # Detect REAL mask updates by comparing segment content
+                        # (positions + masks), ignoring frame_id/timestamp that
+                        # change every frame and inflated the old metric.
+                        mask_fp = _mask_fingerprint(resp)
+                        if mask_fp != last_raw_response:
+                            last_raw_response = mask_fp
                             sam_update_times.append(t_recv)
                             if len(sam_update_times) > 120:
                                 sam_update_times.pop(0)
@@ -338,9 +628,36 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                     await ws.send(data)
                     send_count += 1
 
+                    # --- Process console + whisper commands ---
+                    all_cmds = cmd_input.get_commands()
+                    if whisper_input and whisper_input.available:
+                        all_cmds.extend(whisper_input.get_commands())
+                    for raw_cmd in all_cmds:
+                        action, target = parse_command(raw_cmd)
+                        if action == "blur" and target:
+                            blur_targets.add(target)
+                            print(f"  + Blur: {target}  (active: {', '.join(sorted(blur_targets))})")
+                        elif action == "unblur" and target:
+                            blur_targets.discard(target)
+                            print(f"  - Unblur: {target}  (active: {', '.join(sorted(blur_targets)) or 'none'})")
+                        elif action == "clear":
+                            blur_targets.clear()
+                            print("  Cleared all blur targets.")
+                        elif action == "list":
+                            if blur_targets:
+                                print(f"  Active blur targets: {', '.join(sorted(blur_targets))}")
+                            else:
+                                print("  No active blur targets.")
+                        elif action == "help":
+                            print("  Available labels: " + ", ".join(sorted(KNOWN_LABELS)))
+                            print("  Aliases: " + ", ".join(f"{k}->{v}" for k, v in sorted(LABEL_ALIASES.items())))
+                            print("  Commands: blur <obj>, unblur <obj>, clear, list, help")
+
                     # Display
                     if show and latest_resp is not None:
-                        display = draw_overlay_fast(frame, latest_resp, debug_mode)
+                        # Apply blur effects before drawing overlay
+                        display = apply_blur_effects(frame, latest_resp, blur_targets)
+                        display = draw_overlay_fast(display, latest_resp, debug_mode)
 
                         # Compute SAM FPS from update timestamps
                         if len(sam_update_times) >= 2:
@@ -355,9 +672,9 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         avg_rtt = np.mean(rtts[-60:]) if rtts else 0
                         n_segs = len(latest_resp.segments)
 
-                        # HUD line 1: FPS
+                        # HUD line 1: FPS (Mask = actual mask content updates)
                         cv2.putText(display,
-                                    f"Client {rfps:.0f} fps | SAM {sam_fps:.0f} fps | RTT {avg_rtt:.0f}ms | {n_segs} segs",
+                                    f"Client {rfps:.0f} fps | Mask {sam_fps:.1f} fps | RTT {avg_rtt:.0f}ms | {n_segs} segs",
                                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                     (0, 255, 0), 1, cv2.LINE_AA)
 
@@ -366,6 +683,13 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         cv2.putText(display, mode_text,
                                     (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                                     (180, 180, 180), 1, cv2.LINE_AA)
+
+                        # HUD line 3: blur targets
+                        if blur_targets:
+                            blur_text = "BLUR: " + ", ".join(sorted(blur_targets))
+                            cv2.putText(display, blur_text,
+                                        (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                        (0, 100, 255), 1, cv2.LINE_AA)
 
                         cv2.imshow("SocialSenseAR", display)
 
@@ -400,7 +724,7 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                             sam_fps = 0
                         print(
                             f"Client: {rfps:5.1f} fps | "
-                            f"SAM: {sam_fps:4.1f} fps | "
+                            f"Mask: {sam_fps:4.1f} fps | "
                             f"RTT avg: {avg_rtt:5.1f}ms p95: {p95_rtt:5.1f}ms | "
                             f"Segs: {n_segs:2d} | "
                             f"Frames: {send_count}"
@@ -419,6 +743,9 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                     await recv_task
                 except asyncio.CancelledError:
                     pass
+                cmd_input.stop()
+                if whisper_input:
+                    whisper_input.stop()
 
     except (ConnectionRefusedError, OSError) as e:
         print(f"ERROR: Cannot connect to {url} ({e})")
@@ -437,8 +764,10 @@ def main():
     parser.add_argument("--fps", type=int, default=60, help="Target FPS")
     parser.add_argument("--show", action="store_true", help="Show overlay window")
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
+    parser.add_argument("--whisper", action="store_true",
+                        help="Enable voice commands via Whisper (requires openai-whisper + sounddevice)")
     args = parser.parse_args()
-    asyncio.run(run_client(args.url, args.fps, args.show, args.camera))
+    asyncio.run(run_client(args.url, args.fps, args.show, args.camera, args.whisper))
 
 
 if __name__ == "__main__":
