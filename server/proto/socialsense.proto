@@ -41,6 +41,12 @@ message ServerMessage {
   double timestamp_ms = 2;
   double processing_time_ms = 3;
 
+  // Frame ID that masks actually correspond to (SAM processes older frames due to latency)
+  uint64 masks_frame_id = 5;
+
+  // True when SAM decoder produced new masks (false = cached/unchanged masks)
+  bool masks_updated = 6;
+
   // All segmented objects in the scene
   repeated SceneSegment segments = 10;
 

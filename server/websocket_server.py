@@ -138,6 +138,8 @@ class SocialSenseServer:
         t0 = time.perf_counter()
         response = pb.ServerMessage()
         response.frame_id = msg.frame_id
+        response.masks_frame_id = result.masks_frame_id
+        response.masks_updated = True
         response.timestamp_ms = time.time() * 1000
 
         for seg in result.segments:

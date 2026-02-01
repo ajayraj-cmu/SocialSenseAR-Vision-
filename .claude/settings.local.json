@@ -6,6 +6,9 @@
       "Bash(huggingface-cli login:*)",
       "WebSearch",
       "Bash(pip install:*)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Marshall\\Documents\\GitHub\\nexhacks\\QuestCameraKit"
     ]
   }
 }

@@ -34,13 +34,14 @@ logger = logging.getLogger(__name__)
 
 class PipelineResult:
     """Return value of process_frame()."""
-    __slots__ = ("segments", "fastsam_ms", "gemini_ms", "total_ms")
+    __slots__ = ("segments", "fastsam_ms", "gemini_ms", "total_ms", "masks_frame_id")
 
     def __init__(self):
         self.segments: list[SegmentData] = []
         self.fastsam_ms: float = 0
         self.gemini_ms: float = 0
         self.total_ms: float = 0
+        self.masks_frame_id: int = 0  # frame_id that SAM actually processed
 
 
 class PipelineOrchestrator:
@@ -73,7 +74,7 @@ class PipelineOrchestrator:
 
         # --- Continuous SAM thread ---
         # Pre-decoded BGR frame from ws thread (overlaps decode with SAM GPU work)
-        self._latest_frame: tuple | None = None  # (frame_bgr, fw, fh)
+        self._latest_frame: tuple | None = None  # (frame_bgr, fw, fh, frame_id)
         self._latest_frame_lock = threading.Lock()
         self._new_frame_event = threading.Event()  # Signal SAM loop on new frame
         self._sam_thread: threading.Thread | None = None
@@ -182,17 +183,19 @@ class PipelineOrchestrator:
             if self._cached_result is not None:
                 result = PipelineResult()
                 result.segments = self._cached_result.segments
+                result.masks_frame_id = self._cached_result.masks_frame_id
                 result.total_ms = (time.perf_counter() - t0) * 1000
                 return result
             return PipelineResult()
 
         with self._latest_frame_lock:
-            self._latest_frame = (frame_bgr, fw, fh)
+            self._latest_frame = (frame_bgr, fw, fh, frame_id)
         self._new_frame_event.set()  # Wake up SAM loop immediately
 
         # First frame — run SAM synchronously, then start continuous loop
         if self._cached_result is None:
             result = self._run_sam_sync_decoded(frame_bgr, fw, fh)
+            result.masks_frame_id = frame_id
             result.total_ms = (time.perf_counter() - t0) * 1000
             logger.info(
                 f"Frame {frame_id}: {result.total_ms:.0f}ms (first) | "
@@ -205,6 +208,7 @@ class PipelineOrchestrator:
         # Return cached result (<0.1ms)
         result = PipelineResult()
         result.segments = self._cached_result.segments
+        result.masks_frame_id = self._cached_result.masks_frame_id
         result.fastsam_ms = 0
         result.gemini_ms = 0
         result.total_ms = (time.perf_counter() - t0) * 1000
@@ -294,7 +298,7 @@ class PipelineOrchestrator:
                 continue
             last_frame_id = frame_id
 
-            frame_bgr, fw, fh = frame_tuple
+            frame_bgr, fw, fh, sam_frame_id = frame_tuple
 
             try:
                 t0 = time.perf_counter()
@@ -332,6 +336,7 @@ class PipelineOrchestrator:
                 result = PipelineResult()
                 result.segments = tracked
                 result.fastsam_ms = sam_ms
+                result.masks_frame_id = sam_frame_id
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
