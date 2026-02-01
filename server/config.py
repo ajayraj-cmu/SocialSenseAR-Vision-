@@ -26,8 +26,8 @@ class ServerConfig:
 
     # SAM3 (text-prompted segmentation — requires HF gated access)
     sam3_model: str = "facebook/sam3"
-    sam3_prompts_per_frame: int = 2      # rotating prompts per frame (+ "person" every frame)
-    sam3_cache_ttl: float = 0.5          # mask cache lifetime in seconds
+    sam3_prompts_per_frame: int = 3      # rotating prompts per frame (+ "person" every frame)
+    sam3_cache_ttl: float = 5.0          # mask cache lifetime — must outlast full rotation
     sam3_confidence_threshold: float = 0.3
 
     # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
