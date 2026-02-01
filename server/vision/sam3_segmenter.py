@@ -27,7 +27,6 @@ Same interface as FastSAMSegmenter:
 import os
 import time
 import logging
-import threading
 import cv2
 import numpy as np
 
@@ -99,9 +98,7 @@ class SAM3Segmenter:
         self._cache_ttl = config.sam3_cache_ttl
 
         self._frame_count = 0
-        self._vision_generation = 0  # increments on each vision re-encode
         self._decoder_skipped = False  # True if last frame used fully cached decoder
-        self._cached_segments = None  # cached output when decoder skipped
 
         # TRT engine backend (legacy .engine files)
         self._use_trt = False
@@ -121,8 +118,9 @@ class SAM3Segmenter:
         self._trt_vis_stream = None
         self._trt_vis_outputs = {}     # name -> pre-allocated output tensor
 
-        # Whether TRT vision engine is available (set in initialize())
+        # Whether TRT engines are available (set in initialize())
         self._trt_vision_available = False
+        self._trt_decoder_available = False
 
         # Fast preprocessing (discovered from processor during init)
         self._img_target_h = 0
@@ -143,18 +141,11 @@ class SAM3Segmenter:
         # Batching support
         self._batch_supported = True  # set False if batched call fails
 
-        # Tier 2: Vision embedding cache (skip vision encoder for similar frames)
+        # Cached vision embeds (current frame, for decoder)
         self._cached_vision_embeds = None
-        self._cached_frame_thumb = None  # (32, 32) grayscale thumbnail
-        self._vision_cache_hits = 0
-        self._vision_cache_misses = 0
 
         # Cached FP32 FPN features for TRT (avoid FP16→FP32 every frame)
         self._cached_fpn_fp32 = None  # (fpn_hs_0, fpn_hs_1, fpn_hs_2, fpn_pe_2) or None
-
-        # Async vision encoding (non-blocking scene change handling)
-        self._vision_encode_pending = False
-        self._vision_encode_thread = None
 
         # Pre-computed FP32 text embeddings for TRT decoder
         self._text_embeds_fp32 = {}  # prompt -> (text_embeds_fp32, attn_mask_i64)
@@ -183,7 +174,12 @@ class SAM3Segmenter:
         meta_path = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
         self._trt_vision_available = os.path.exists(vis_engine) and os.path.exists(meta_path)
 
-        # Init PyTorch (skips vision torch.compile + warmup if TRT vision available)
+        topk_engine = os.path.join(_PROJECT_ROOT, "sam3_topk_decoder.engine")
+        full_engine = os.path.join(_PROJECT_ROOT, "sam3_decoder.engine")
+        dec_engine_path = topk_engine if os.path.exists(topk_engine) else full_engine
+        self._trt_decoder_available = os.path.exists(dec_engine_path)
+
+        # Init PyTorch (skips torch.compile + warmup for components with TRT replacements)
         self._init_pytorch()
 
         # --- TRT Vision Loading ---
@@ -204,17 +200,29 @@ class SAM3Segmenter:
                 self._init_pytorch_model_only()
 
         # --- TRT Decoder Loading ---
-        topk_engine = os.path.join(_PROJECT_ROOT, "sam3_topk_decoder.engine")
-        full_engine = os.path.join(_PROJECT_ROOT, "sam3_decoder.engine")
-        dec_engine_path = topk_engine if os.path.exists(topk_engine) else full_engine
-
-        if os.path.exists(dec_engine_path):
+        if self._trt_decoder_available:
             try:
                 self._init_trt_decoder(dec_engine_path)
             except Exception as e:
                 logger.warning(f"TRT decoder init failed, using PyTorch decoder: {e}")
                 import traceback
                 traceback.print_exc()
+
+        # --- Free unused PyTorch components to reclaim VRAM ---
+        freed = []
+        # Text encoder: only needed during init for _precompute_text_embeds()
+        if self._text_embeds_ready and hasattr(self._model, 'text_encoder'):
+            del self._model.text_encoder
+            freed.append("text_encoder")
+        # Decoder components: only needed if PyTorch decoder fallback is active
+        if self._use_trt_decoder:
+            for name in ["detr_encoder", "detr_decoder", "mask_decoder"]:
+                if hasattr(self._model, name):
+                    delattr(self._model, name)
+                    freed.append(name)
+        if freed:
+            self._torch.cuda.empty_cache()
+            logger.info(f"    Freed PyTorch components: {', '.join(freed)}")
 
         self._initialized = True
 
@@ -255,14 +263,18 @@ class SAM3Segmenter:
         # --- Pre-compute text embeddings (bypass CLIP-24L during inference) ---
         self._precompute_text_embeds()
 
-        # --- torch.compile: decoder submodules (and vision if no TRT) ---
+        # --- torch.compile: only for components WITHOUT TRT replacements ---
         # "default" mode only — reduce-overhead/max-autotune use CUDA graphs
         # which conflict with SAM3's FPN neck (outputs get overwritten on replay)
-        compile_targets = ["detr_encoder", "detr_decoder", "mask_decoder"]
+        compile_targets = []
         if not self._trt_vision_available:
-            compile_targets.insert(0, "vision_encoder")
+            compile_targets.append("vision_encoder")
         else:
             logger.info("    Skipping torch.compile on vision_encoder (TRT vision available)")
+        if not self._trt_decoder_available:
+            compile_targets.extend(["detr_encoder", "detr_decoder", "mask_decoder"])
+        else:
+            logger.info("    Skipping torch.compile on decoder submodules (TRT decoder available)")
         for name in compile_targets:
             try:
                 setattr(self._model, name, torch.compile(
@@ -398,10 +410,15 @@ class SAM3Segmenter:
             if self._device == "cuda":
                 dummy_pv = dummy_pv.half()
 
+            # Skip all warmup if both TRT engines are available
+            if self._trt_vision_available and self._trt_decoder_available:
+                logger.info("    Skipping PyTorch warmup (TRT vision + decoder available)")
+                logger.info(f"    Full warm-up done: {(time.perf_counter() - t_model)*1000:.0f}ms")
+                return
+
             if self._trt_vision_available:
                 logger.info("    Skipping vision warmup (TRT vision will be used)")
                 # Generate dummy vision embeddings for decoder warmup only
-                # Use a single uncompiled forward pass (won't trigger compile warmup)
                 with torch.no_grad():
                     vis = self._model.get_vision_features(pixel_values=dummy_pv)
             else:
@@ -664,23 +681,25 @@ class SAM3Segmenter:
             with torch.no_grad():
                 return self._model.get_vision_features(pixel_values=pixel_values)
 
-        # Build a mock vision output object matching Sam3VisionEncoderOutput
+        # Build a mock vision output referencing pre-allocated TRT buffers directly.
+        # No cloning needed — synchronous pipeline ensures buffers won't be overwritten
+        # until next frame's vision encode (after decoder finishes).
         class _VisionOutput:
             pass
 
         out = _VisionOutput()
-        out.last_hidden_state = self._trt_vis_outputs["last_hidden_state"].clone()
+        out.last_hidden_state = self._trt_vis_outputs["last_hidden_state"]
         out.fpn_hidden_states = [
-            self._trt_vis_outputs["fpn_hs_0"].clone(),
-            self._trt_vis_outputs["fpn_hs_1"].clone(),
-            self._trt_vis_outputs["fpn_hs_2"].clone(),
-            self._trt_vis_outputs["fpn_hs_3"].clone(),
+            self._trt_vis_outputs["fpn_hs_0"],
+            self._trt_vis_outputs["fpn_hs_1"],
+            self._trt_vis_outputs["fpn_hs_2"],
+            self._trt_vis_outputs["fpn_hs_3"],
         ]
         out.fpn_position_encoding = [
-            self._trt_vis_outputs["fpn_pe_0"].clone(),
-            self._trt_vis_outputs["fpn_pe_1"].clone(),
-            self._trt_vis_outputs["fpn_pe_2"].clone(),
-            self._trt_vis_outputs["fpn_pe_3"].clone(),
+            self._trt_vis_outputs["fpn_pe_0"],
+            self._trt_vis_outputs["fpn_pe_1"],
+            self._trt_vis_outputs["fpn_pe_2"],
+            self._trt_vis_outputs["fpn_pe_3"],
         ]
 
         # Provide keys() for clone/expand helpers
@@ -764,95 +783,23 @@ class SAM3Segmenter:
     # Vision embedding cache (Tier 2)
     # ------------------------------------------------------------------
 
-    def _frame_thumbnail(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """Downscale to 32x32 grayscale for fast similarity comparison."""
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+    # (_frame_thumbnail removed — no longer needed without async vision caching)
 
 
-    # ------------------------------------------------------------------
-    # Async vision encoding
-    # ------------------------------------------------------------------
-
-    def _queue_vision_encode(self, frame_bgr: np.ndarray):
-        """Queue an async vision encode on a background thread.
-
-        The main SAM thread continues using stale cache while this runs.
-        When done, updates cache + increments generation so the decoder
-        re-runs with fresh embeddings on the next frame.
-        """
-        if self._vision_encode_pending:
-            return  # already encoding, skip
-        self._vision_encode_pending = True
-        self._vision_encode_thread = threading.Thread(
-            target=self._vision_encode_worker,
-            args=(frame_bgr.copy(),),
-            daemon=True,
-        )
-        self._vision_encode_thread.start()
-
-    def _vision_encode_worker(self, frame_bgr: np.ndarray):
-        """Background thread: preprocess + vision encode + update cache."""
-        try:
-            torch = self._torch
-            if self._fast_preprocess_ready:
-                pixel_values = self._preprocess_fast(frame_bgr)
-            else:
-                pixel_values = self._preprocess_slow(frame_bgr)
-
-            if self._use_trt_vision:
-                vision_embeds = self._run_vision_trt(pixel_values)
-            else:
-                with torch.no_grad():
-                    vision_embeds = self._model.get_vision_features(pixel_values=pixel_values)
-
-            # Ensure all GPU work is complete before updating cache
-            # (prevents TRT decoder contention on the main thread)
-            torch.cuda.synchronize()
-
-            # Atomic cache update (GIL ensures consistency)
-            # Clone tensors to new storage so compiled model can't overwrite them
-            cloned = self._clone_vision_output(vision_embeds)
-
-            # Debug: log FPN + PE tensor stats to verify async output quality
-            try:
-                fpn = cloned.fpn_hidden_states
-                pe = cloned.fpn_position_encoding
-                fpn_norms = [f"fpn{i}={fpn[i].float().norm().item():.1f}" for i in range(min(3, len(fpn)))]
-                pe_norms = [f"pe{i}={pe[i].float().norm().item():.1f}" for i in range(min(3, len(pe)))]
-                msg = f"Async FPN: {', '.join(fpn_norms)} | PE: {', '.join(pe_norms)}"
-                # Check for NaN
-                for i in range(min(3, len(fpn))):
-                    if torch.isnan(fpn[i]).any().item():
-                        msg += f" !!!fpn{i} has NaN"
-                for i in range(min(3, len(pe))):
-                    if torch.isnan(pe[i]).any().item():
-                        msg += f" !!!pe{i} has NaN"
-                logger.info(f"    {msg}")
-                _dbg(msg)
-            except Exception as e:
-                logger.warning(f"    Could not log FPN norms: {e}")
-                _dbg(f"Async FPN norms ERROR: {e}")
-
-            self._cached_vision_embeds = cloned
-            self._cached_frame_thumb = self._frame_thumbnail(frame_bgr)
-            self._cached_fpn_fp32 = None  # invalidate FP32 FPN cache
-            self._cached_segments = None  # invalidate segment cache
-            self._vision_cache_misses += 1
-            self._vision_generation += 1
-
-            logger.info(f"    Async vision encode done (gen={self._vision_generation})")
-        except Exception as e:
-            logger.warning(f"    Async vision encode failed: {e}")
-        finally:
-            self._vision_encode_pending = False
+    # (Async vision encoding removed — pipeline is now fully synchronous.
+    #  TRT vision runs in ~200ms, making async unnecessary.)
 
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
     def segment_frame(self, frame_bgr: np.ndarray) -> list[SegmentData]:
-        """Run SAM3 on one BGR frame. Uses best available backend."""
+        """Run SAM3 on one BGR frame — fully synchronous pipeline.
+
+        Flow: preprocess → vision encode (TRT or PyTorch) → select prompts →
+              decode (TRT or PyTorch) → build segments.
+        No async threads, no vision caching. Every frame gets fresh embeddings.
+        """
         if not self._initialized:
             self.initialize()
 
@@ -862,125 +809,74 @@ class SAM3Segmenter:
         now = time.time()
         self._frame_count += 1
 
-        # --- Step 1+2: Vision cache + continuous async encode ---
-        # Use cached vision embeddings if available. Queue async re-encode
-        # AFTER decoder check so the decoder gets a chance to use fresh embeddings
-        # when a vision encode completes (otherwise _vision_encode_pending blocks decoder).
-        t_vis = time.perf_counter()
-        vision_cache_hit = False
-        pre_ms = 0.0
-        if self._cached_vision_embeds is not None:
-            vision_embeds = self._cached_vision_embeds
-            vision_cache_hit = True
-            self._vision_cache_hits += 1
-            # NOTE: _queue_vision_encode() moved to AFTER decoder check (Step 4b)
-        else:
-            # First frame — must encode synchronously
-            t_pre = time.perf_counter()
-            if self._use_trt:
-                pixel_values = self._trt.preprocess(frame_bgr)
-            elif self._fast_preprocess_ready:
-                pixel_values = self._preprocess_fast(frame_bgr)
-            else:
-                pixel_values = self._preprocess_slow(frame_bgr)
-            pre_ms = (time.perf_counter() - t_pre) * 1000
+        try:
+            return self._segment_frame_inner(frame_bgr, torch, t0, h, w, now)
+        except Exception as e:
+            import traceback
+            _dbg(f"CRASH in segment_frame #{self._frame_count}: {e}\n{traceback.format_exc()}")
+            raise
 
-            if self._use_trt_vision:
-                vision_embeds = self._run_vision_trt(pixel_values)
-            elif self._use_trt:
-                vision_embeds = self._trt.encode_vision(pixel_values)
-            else:
-                with torch.no_grad():
-                    vision_embeds = self._model.get_vision_features(pixel_values=pixel_values)
-            self._cached_vision_embeds = self._clone_vision_output(vision_embeds)
-            self._cached_frame_thumb = self._frame_thumbnail(frame_bgr)
-            self._cached_fpn_fp32 = None
-            self._vision_cache_misses += 1
-            self._vision_generation += 1
-            # Debug: log sync FPN norms for comparison with async
-            try:
-                fpn = self._cached_vision_embeds.fpn_hidden_states
-                norms = [f"fpn{i}={fpn[i].float().norm().item():.1f}" for i in range(min(3, len(fpn)))]
-                msg = f"Sync FPN norms: {', '.join(norms)}"
-                logger.info(f"    {msg}")
-                _dbg(msg)
-            except Exception as e:
-                logger.warning(f"    Could not log sync FPN norms: {e}")
-                _dbg(f"Sync FPN norms ERROR: {e}")
+    def _segment_frame_inner(self, frame_bgr, torch, t0, h, w, now):
+        # --- Step 1: Preprocess ---
+        t_pre = time.perf_counter()
+        if self._use_trt:
+            pixel_values = self._trt.preprocess(frame_bgr)
+        elif self._fast_preprocess_ready:
+            pixel_values = self._preprocess_fast(frame_bgr)
+        else:
+            pixel_values = self._preprocess_slow(frame_bgr)
+        pre_ms = (time.perf_counter() - t_pre) * 1000
+
+        # --- Step 2: Vision encode (synchronous) ---
+        t_vis = time.perf_counter()
+        if self._use_trt_vision:
+            vision_embeds = self._run_vision_trt(pixel_values)
+        elif self._use_trt:
+            vision_embeds = self._trt.encode_vision(pixel_values)
+        else:
+            with torch.no_grad():
+                vision_embeds = self._model.get_vision_features(pixel_values=pixel_values)
+            # Clone needed for PyTorch — compiled model can overwrite tensor storage
+            vision_embeds = self._clone_vision_output(vision_embeds)
+
+        self._cached_vision_embeds = vision_embeds
+        self._cached_fpn_fp32 = None  # invalidate FP32 FPN cache
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 3: Select prompts for this frame ---
-        # During async vision encode: only person (avoid GPU decoder contention)
-        # Otherwise: person + 1 rotating prompt for scene detection
+        # --- Step 3: Select prompts (person + 1 rotating) ---
         object_prompts = [p for p in ALL_PROMPTS if p != "person"]
         prompts_this_frame = ["person"]
-        if not self._vision_encode_pending:
-            n_rotating = 1
-            for i in range(n_rotating):
-                idx = (self._rotate_index + i) % len(object_prompts)
-                prompts_this_frame.append(object_prompts[idx])
-            self._rotate_index = (self._rotate_index + n_rotating) % len(object_prompts)
+        idx = self._rotate_index % len(object_prompts)
+        prompts_this_frame.append(object_prompts[idx])
+        self._rotate_index = (self._rotate_index + 1) % len(object_prompts)
 
-        # --- Step 4: Decoder (skip prompts already cached with current vision) ---
+        # --- Step 4: Decode all prompts (always fresh — no generation check needed) ---
         t_dec = time.perf_counter()
-        prompts_to_decode = []
-        prompt_masks = {}
+        new_masks = self._run_decoder(vision_embeds, prompts_this_frame, h, w)
+        dec_ms = (time.perf_counter() - t_dec) * 1000
 
-        # Skip decoder entirely while async vision encode is running on GPU
-        # (avoids GPU contention that inflates decoder from 50ms to 280ms+)
-        if self._vision_encode_pending:
-            for p in prompts_this_frame:
-                entry = self._mask_cache.get(p)
-                prompt_masks[p] = entry[0] if entry is not None else None
-        else:
-            for p in prompts_this_frame:
-                entry = self._mask_cache.get(p)
-                if entry is not None and entry[2] == self._vision_generation:
-                    prompt_masks[p] = entry[0]  # reuse cached mask (may be None)
-                else:
-                    prompts_to_decode.append(p)
+        # Update mask cache (still used by _build_segments for non-queried prompts)
+        for prompt, mask_u8 in new_masks.items():
+            self._mask_cache[prompt] = (mask_u8, now, self._frame_count)
 
-        self._decoder_skipped = len(prompts_to_decode) == 0
+        self._decoder_skipped = False
 
-        if self._decoder_skipped and self._cached_segments is not None:
-            # All prompts cached with current vision — reuse previous segments
-            segments = self._cached_segments
-            dec_ms = (time.perf_counter() - t_dec) * 1000
-        else:
-            if prompts_to_decode:
-                new_masks = self._run_decoder(vision_embeds, prompts_to_decode, h, w)
-                prompt_masks.update(new_masks)
-            dec_ms = (time.perf_counter() - t_dec) * 1000
-
-            # Update mask cache (3-tuple: mask_or_None, timestamp, generation)
-            for prompt, mask_u8 in prompt_masks.items():
-                self._mask_cache[prompt] = (mask_u8, now, self._vision_generation)
-
-            # --- Step 5: Build segments from cache ---
-            segments = self._build_segments(h, w, now)
-            self._cached_segments = segments
-
-        # --- Step 4b: Always re-encode vision asynchronously ---
-        # No similarity check — Quest handles motion detection.
-        # Queue new encode as soon as previous finishes.
-        if vision_cache_hit and not self._vision_encode_pending:
-            self._queue_vision_encode(frame_bgr)
+        # --- Step 5: Build segments from cache ---
+        segments = self._build_segments(h, w, now)
 
         total_ms = (time.perf_counter() - t0) * 1000
         if self._frame_count <= 20 or self._frame_count % 10 == 0:
-            _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms dec={dec_ms:.0f} "
-                 f"{'SKIP' if self._decoder_skipped else f'{len(prompts_to_decode)}/{len(prompts_this_frame)}'} "
-                 f"{len(segments)} segs gen={self._vision_generation} pending={self._vision_encode_pending}")
+            _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
+                 f"(pre={pre_ms:.0f} vis={vis_ms:.0f} dec={dec_ms:.0f}) "
+                 f"{len(prompts_this_frame)}p {len(segments)}s")
         if self._frame_count % 30 == 0 or self._frame_count <= 3:
-            backend = "TRT-dec" if self._use_trt_decoder else ("TRT" if self._use_trt else ("batched" if self._batch_supported else "seq"))
-            dcache = "SKIP" if self._decoder_skipped else f"{len(prompts_to_decode)}/{len(prompts_this_frame)}"
-            total_hits = self._vision_cache_hits
-            total_misses = self._vision_cache_misses
+            backend = "TRT-vis+dec" if (self._use_trt_vision and self._use_trt_decoder) else \
+                      "TRT-dec" if self._use_trt_decoder else \
+                      ("TRT" if self._use_trt else ("batched" if self._batch_supported else "seq"))
             logger.info(
                 f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
-                f"(pre={pre_ms:.0f}, vis={vis_ms:.0f}{'[C]' if vision_cache_hit else ''}, "
-                f"dec={dec_ms:.0f}[{dcache}]) | "
-                f"{len(segments)} segs | {backend} | vcache={total_hits}/{total_hits+total_misses}"
+                f"(pre={pre_ms:.0f}, vis={vis_ms:.0f}, dec={dec_ms:.0f}) | "
+                f"{len(segments)} segs | {backend}"
             )
 
         return segments
@@ -1034,7 +930,7 @@ class SAM3Segmenter:
 
         Uses B=1 per prompt to avoid dynamic batch shape issues that cause NaN.
         Uses default CUDA stream (0) with full synchronization to prevent races.
-        Proactively rebuilds TRT context every 4 calls to prevent state corruption.
+        No proactive context rebuild — reactive NaN check handles edge cases.
         """
         torch = self._torch
 
@@ -1051,14 +947,9 @@ class SAM3Segmenter:
         for p in prompts:
             te, am = self._text_embeds_fp32[p]
 
-            # Proactive context rebuild every 4 TRT calls
+            # No proactive context rebuild — B=1 + default stream + full sync prevents NaN.
+            # Reactive NaN check below handles any edge cases.
             self._trt_call_count += 1
-            if self._trt_call_count % 4 == 0:
-                try:
-                    self._trt_context = self._trt_engine.create_execution_context()
-                    _dbg(f"TRT context proactive rebuild at call #{self._trt_call_count}")
-                except Exception as e:
-                    _dbg(f"TRT context rebuild failed: {e}")
 
             ctx = self._trt_context
 
@@ -1118,14 +1009,15 @@ class SAM3Segmenter:
             ).squeeze().to(torch.uint8) * 255
             mask_u8 = mask_resized.cpu().numpy()
 
-            if cv2.countNonZero(mask_u8) < self.config.mask_min_area:
+            nz = cv2.countNonZero(mask_u8)
+            if nz < self.config.mask_min_area:
                 result[p] = None
             else:
                 result[p] = mask_u8
 
         # Log scores
         score_info = ", ".join(f"{p}={all_scores[i]:.4f}" for i, p in enumerate(prompts))
-        _dbg(f"TRT-topk F#{self._frame_count} scores: [{score_info}] gen={self._vision_generation} calls={self._trt_call_count}")
+        _dbg(f"TRT-topk F#{self._frame_count} scores: [{score_info}] calls={self._trt_call_count}")
 
         return result
 
@@ -1489,7 +1381,7 @@ class SAM3Segmenter:
         if self._frame_count <= 20 or self._frame_count % 100 == 0:
             cache_info = {p: (m is not None, f"age={now-ts:.1f}s", f"gen={g}")
                          for p, (m, ts, g) in self._mask_cache.items()}
-            _dbg(f"_build_segments F#{self._frame_count}: cache={cache_info} cur_gen={self._vision_generation}")
+            _dbg(f"_build_segments F#{self._frame_count}: cache={cache_info}")
 
         # Person first (priority)
         if "person" in self._mask_cache:
@@ -1570,8 +1462,6 @@ class SAM3Segmenter:
 
     def shutdown(self):
         """Release all resources."""
-        if self._vision_encode_thread and self._vision_encode_thread.is_alive():
-            self._vision_encode_thread.join(timeout=5)
         self._model = None
         self._processor = None
         self._compiled_forward = None
