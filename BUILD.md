@@ -10,59 +10,60 @@ TensorRT engines are compiled for a specific GPU architecture, driver version, a
 - At least 8 GB system RAM free during export
 - At least 6 GB VRAM (export temporarily uses ~5 GB)
 
-## Quick Build (3 commands)
+## Quick Build (3 commands per resolution)
+
+The export script supports multiple resolutions. Files are saved with a `_<res>` suffix so they don't overwrite each other. The server loads the correct set based on `sam3_resolution` in `server/config.py`.
+
+### Build 1008 (default, best quality)
 
 ```bash
-# Step 1: Export SAM3 model to ONNX (~3-5 min, downloads ~2 GB model on first run)
-python -m server.vision.sam3_export
+# Step 1: Export ONNX at 1008x1008
+python -m server.vision.sam3_export --resolution 1008
 
-# Step 2: Build vision encoder TRT engine (~2-5 min)
-python build_trt_engine.py sam3_vision.onnx
+# Step 2: Build vision engine
+python build_trt_engine.py sam3_vision_1008.onnx
 
-# Step 3: Build decoder TRT engine (~1-2 min)
-python build_trt_engine.py sam3_topk_decoder.onnx
+# Step 3: Build decoder engine
+python build_trt_engine.py sam3_topk_decoder_1008.onnx
 ```
 
-After building, you should have these files in the project root:
+### Build 784 (faster, lower quality)
+
+```bash
+# Step 1: Export ONNX at 784x784
+python -m server.vision.sam3_export --resolution 784
+
+# Step 2: Build vision engine
+python build_trt_engine.py sam3_vision_784.onnx
+
+# Step 3: Build decoder engine
+python build_trt_engine.py sam3_topk_decoder_784.onnx
+```
+
+### Switching Resolutions
+
+Set `sam3_resolution` in `server/config.py`:
+
+```python
+sam3_resolution: int = 1008   # or 784
+```
+
+The server looks for `sam3_vision_<res>.engine`, `sam3_topk_decoder_<res>.engine`, and `sam3_meta_<res>.json`. Falls back to unsuffixed filenames if resolution-specific files aren't found.
+
+## Files After Building Both Resolutions
 
 | File | Size | Description |
 |------|------|-------------|
-| `sam3_vision.onnx` | ~1.8 GB | Vision encoder ONNX (intermediate, can delete after build) |
-| `sam3_topk_decoder.onnx` | ~90 MB | Decoder ONNX (intermediate, can delete after build) |
-| `sam3_decoder.onnx` | ~90 MB | Full decoder ONNX (fallback, can delete) |
-| `sam3_meta.json` | ~2 KB | Tensor shapes and preprocessing config (keep) |
-| `sam3_vision.engine` | ~870 MB | TRT FP16 vision engine (keep) |
-| `sam3_topk_decoder.engine` | ~50 MB | TRT FP16 decoder engine (keep) |
-
-## Step-by-Step Details
-
-### Step 1: ONNX Export
-
-```bash
-python -m server.vision.sam3_export
-```
-
-This downloads `facebook/sam3` from HuggingFace (gated model -- you need access), loads it in PyTorch, and exports three ONNX files plus `sam3_meta.json`.
-
-**First run**: Downloads ~2 GB of model weights to your HuggingFace cache. Requires `huggingface-cli login` if the model is gated.
-
-**VRAM note**: The export temporarily needs ~5 GB VRAM for FP32 tracing. Close other GPU-heavy apps first. If you get OOM errors, the script moves components to CPU automatically.
-
-### Step 2: Build Vision Engine
-
-```bash
-python build_trt_engine.py sam3_vision.onnx
-```
-
-Builds a TensorRT FP16 engine from the vision ONNX. This is the largest engine (~870 MB) and takes the longest to build. TRT profiles different kernel implementations and picks the fastest for your specific GPU.
-
-### Step 3: Build Decoder Engine
-
-```bash
-python build_trt_engine.py sam3_topk_decoder.onnx
-```
-
-Builds the top-k decoder engine (~50 MB). This is fast.
+| `sam3_vision_1008.onnx` | ~1.8 GB | Vision ONNX at 1008 (intermediate) |
+| `sam3_vision_784.onnx` | ~1.8 GB | Vision ONNX at 784 (intermediate) |
+| `sam3_topk_decoder_1008.onnx` | ~90 MB | Decoder ONNX at 1008 (intermediate) |
+| `sam3_topk_decoder_784.onnx` | ~90 MB | Decoder ONNX at 784 (intermediate) |
+| `sam3_meta_1008.json` | ~2 KB | Shapes/config for 1008 (keep) |
+| `sam3_meta_784.json` | ~2 KB | Shapes/config for 784 (keep) |
+| `sam3_vision_1008.engine` | ~870 MB | TRT FP16 vision at 1008 (keep) |
+| `sam3_vision_784.engine` | ~870 MB | TRT FP16 vision at 784 (keep) |
+| `sam3_topk_decoder_1008.engine` | ~50 MB | TRT FP16 decoder at 1008 (keep) |
+| `sam3_topk_decoder_784.engine` | ~50 MB | TRT FP16 decoder at 784 (keep) |
 
 ## Verification
 
@@ -78,9 +79,9 @@ python -u -m server.test_client --show
 
 Check server startup logs for:
 ```
-Loading TRT vision engine: ...sam3_vision.engine
+SAM3 resolution: 1008x1008
+Vision engine: sam3_vision_1008.engine
 TRT vision ready
-Loading TRT decoder engine: ...sam3_topk_decoder.engine
 TRT decoder ready
 ```
 
@@ -115,7 +116,7 @@ You do NOT need to rebuild when:
 
 ## Troubleshooting
 
-**"No decoder ONNX found"**: Run Step 1 first (`python -m server.vision.sam3_export`).
+**"No decoder ONNX found"**: Run the export step first.
 
 **OOM during export**: Close Chrome, Discord, etc. The export needs ~5 GB VRAM temporarily.
 
