@@ -876,7 +876,7 @@ class SAM3Segmenter:
     def _segment_frame_inner(self, frame_bgr, torch, t0, h, w, now):
         # --- Step 1: Check frame similarity (Phase 4 — vision skip) ---
         frame_changed = self._frame_changed(frame_bgr)
-        force_refresh = (self._frame_count % 30 == 0)  # safety: full refresh every 30 frames
+        force_refresh = (self._frame_count % 60 == 0)  # safety: full refresh every 60 frames (~2s)
         need_vision = frame_changed or self._cached_vision_embeds is None or force_refresh
 
         # --- Step 2: Preprocess (only if vision needed) ---
@@ -921,25 +921,41 @@ class SAM3Segmenter:
             prompts_this_frame.append(ALL_PROMPTS[idx])
         self._rotate_index = (self._rotate_index + n) % len(ALL_PROMPTS)
 
-        # --- Step 5: Decode all prompts (always fresh — no generation check needed) ---
+        # --- Step 5: Decode prompts (skip when vision unchanged + cache fresh) ---
         t_dec = time.perf_counter()
-        new_masks = self._run_decoder(vision_embeds, prompts_this_frame, h, w)
+        if need_vision:
+            # Scene changed — must re-decode all prompts
+            new_masks = self._run_decoder(vision_embeds, prompts_this_frame, h, w)
+        else:
+            # Scene unchanged — skip decoder for prompts with fresh cache
+            prompts_to_decode = []
+            for p in prompts_this_frame:
+                if p in self._mask_cache:
+                    _, cache_time, _ = self._mask_cache[p]
+                    if now - cache_time < self._cache_ttl:
+                        continue  # cached mask still valid for same scene
+                prompts_to_decode.append(p)
+            if prompts_to_decode:
+                new_masks = self._run_decoder(vision_embeds, prompts_to_decode, h, w)
+            else:
+                new_masks = {}
         dec_ms = (time.perf_counter() - t_dec) * 1000
 
-        # Update mask cache (still used by _build_segments for non-queried prompts)
+        # Update mask cache
         for prompt, mask_u8 in new_masks.items():
             self._mask_cache[prompt] = (mask_u8, now, self._frame_count)
 
-        self._decoder_skipped = False
+        self._decoder_skipped = (len(new_masks) == 0)
 
         # --- Step 6: Build segments from cache ---
         segments = self._build_segments(h, w, now)
 
         total_ms = (time.perf_counter() - t0) * 1000
         vis_tag = "SKIP" if not need_vision else f"{vis_ms:.0f}"
+        dec_tag = "SKIP" if self._decoder_skipped else f"{dec_ms:.0f}"
         if self._frame_count <= 20 or self._frame_count % 10 == 0:
             _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
-                 f"(pre={pre_ms:.0f} vis={vis_tag} dec={dec_ms:.0f}) "
+                 f"(pre={pre_ms:.0f} vis={vis_tag} dec={dec_tag}) "
                  f"{len(prompts_this_frame)}p {len(segments)}s "
                  f"vskip={self._vision_skip_count}")
         if self._frame_count % 30 == 0 or self._frame_count <= 3:
