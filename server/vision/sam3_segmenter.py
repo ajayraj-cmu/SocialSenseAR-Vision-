@@ -911,9 +911,8 @@ class SAM3Segmenter:
             self._vision_skip_count += 1
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 4: Select prompts (N rotating from all prompts, person included) ---
-        # All prompts rotate equally — person refreshes every len(ALL_PROMPTS) frames
-        # (e.g. 13 frames × 26ms = 338ms, well within 4s cache TTL)
+        # --- Step 4: Select prompts ---
+        # Normal: rotate 1 prompt per frame through all categories
         n = min(self._prompts_per_frame, len(ALL_PROMPTS))
         prompts_this_frame = []
         for i in range(n):
@@ -921,11 +920,16 @@ class SAM3Segmenter:
             prompts_this_frame.append(ALL_PROMPTS[idx])
         self._rotate_index = (self._rotate_index + n) % len(ALL_PROMPTS)
 
-        # --- Step 5: Decode prompts (skip when vision unchanged + cache fresh) ---
+        # --- Step 5: Decode prompts ---
         t_dec = time.perf_counter()
         if need_vision:
-            # Scene changed — must re-decode all prompts
-            new_masks = self._run_decoder(vision_embeds, prompts_this_frame, h, w)
+            # Scene changed — re-decode ALL previously-detected prompts so masks
+            # update immediately (not over 13 frames of rotation)
+            prompts_to_decode = list(prompts_this_frame)  # always include rotation
+            for p, (mask_u8, _, _) in self._mask_cache.items():
+                if p not in prompts_to_decode and mask_u8 is not None:
+                    prompts_to_decode.append(p)
+            new_masks = self._run_decoder(vision_embeds, prompts_to_decode, h, w)
         else:
             # Scene unchanged — skip decoder for prompts with fresh cache
             prompts_to_decode = []
@@ -954,9 +958,10 @@ class SAM3Segmenter:
         vis_tag = "SKIP" if not need_vision else f"{vis_ms:.0f}"
         dec_tag = "SKIP" if self._decoder_skipped else f"{dec_ms:.0f}"
         if self._frame_count <= 20 or self._frame_count % 10 == 0:
+            n_decoded = len(new_masks)
             _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
                  f"(pre={pre_ms:.0f} vis={vis_tag} dec={dec_tag}) "
-                 f"{len(prompts_this_frame)}p {len(segments)}s "
+                 f"{n_decoded}p {len(segments)}s "
                  f"vskip={self._vision_skip_count}")
         if self._frame_count % 30 == 0 or self._frame_count <= 3:
             backend = "TRT-vis+dec" if (self._use_trt_vision and self._use_trt_decoder) else \
