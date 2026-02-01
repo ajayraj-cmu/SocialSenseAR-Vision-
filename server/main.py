@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-id", type=int, default=0, help="GPU index")
     parser.add_argument("--no-audio", action="store_true", help="Disable audio pipeline")
     parser.add_argument("--no-emotion", action="store_true", help="Disable emotion detection")
+    parser.add_argument("--pipeline", default="sam3",
+                        choices=["sam3", "grounded-sam2", "legacy"],
+                        help="Pipeline mode: sam3 (default), grounded-sam2, or legacy")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Shorthand for --pipeline legacy")
     parser.add_argument("--stub", action="store_true",
                         help="Run with stub pipeline (no ML models, for testing)")
     parser.add_argument("--debug-view", action="store_true",
@@ -68,6 +73,7 @@ def main():
         port=args.port,
         device=args.device,
         gpu_id=args.gpu_id,
+        pipeline_mode="legacy" if args.legacy else args.pipeline,
         fastsam_device=args.device,
         audio_enabled=not args.no_audio,
         emotion_enabled=not args.no_emotion,
@@ -91,6 +97,7 @@ def main():
     logger.info(f"  Host:     {config.host}")
     logger.info(f"  Port:     {config.port}")
     logger.info(f"  Device:   {config.device} (GPU {config.gpu_id})")
+    logger.info(f"  Pipeline: {config.pipeline_mode}")
     logger.info(f"  Protobuf: {pb_backend}")
     logger.info(f"  Audio:    {'enabled' if config.audio_enabled else 'disabled'}")
     logger.info(f"  Emotion:  {'enabled' if config.emotion_enabled else 'disabled'}")

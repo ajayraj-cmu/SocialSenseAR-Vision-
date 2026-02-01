@@ -25,8 +25,7 @@ import threading
 import cv2
 import numpy as np
 
-from server.vision.fastsam_segmenter import FastSAMSegmenter, SegmentData
-from server.vision.gemini_labeler import GeminiLabeler
+from server.vision.segment_data import SegmentData
 from server.encoding.rle import encode_rle
 from server.config import ServerConfig
 
@@ -54,9 +53,23 @@ class PipelineOrchestrator:
     def __init__(self, config: ServerConfig):
         self.config = config
 
-        # Vision components
-        self._segmenter = FastSAMSegmenter(config)
-        self._labeler = GeminiLabeler(config)
+        # Vision components — conditional on pipeline mode
+        if config.pipeline_mode == "grounded-sam2":
+            from server.vision.grounded_sam2_segmenter import GroundedSAM2Segmenter
+            self._segmenter = GroundedSAM2Segmenter(config)
+            self._labeler = None  # GroundingDINO provides labels
+            logger.info("Pipeline mode: Grounded SAM2 (GroundingDINO + SAM2)")
+        elif config.pipeline_mode == "sam3":
+            from server.vision.sam3_segmenter import SAM3Segmenter
+            self._segmenter = SAM3Segmenter(config)
+            self._labeler = None  # SAM3 text prompts ARE labels
+            logger.info("Pipeline mode: SAM3 (text-prompted, no Gemini)")
+        else:
+            from server.vision.fastsam_segmenter import FastSAMSegmenter
+            from server.vision.gemini_labeler import GeminiLabeler
+            self._segmenter = FastSAMSegmenter(config)
+            self._labeler = GeminiLabeler(config)
+            logger.info("Pipeline mode: Legacy (FastSAM + MediaPipe + Gemini)")
 
         # --- Continuous SAM thread ---
         # Pre-decoded BGR frame from ws thread (overlaps decode with SAM GPU work)
@@ -112,9 +125,12 @@ class PipelineOrchestrator:
         t_seg = time.perf_counter()
         logger.info(f"  Segmenter init: {(t_seg - t0)*1000:.0f}ms")
 
-        self._labeler.initialize()
-        t_lbl = time.perf_counter()
-        logger.info(f"  Gemini labeler init: {(t_lbl - t_seg)*1000:.0f}ms")
+        if self._labeler is not None:
+            self._labeler.initialize()
+            t_lbl = time.perf_counter()
+            logger.info(f"  Gemini labeler init: {(t_lbl - t_seg)*1000:.0f}ms")
+        else:
+            t_lbl = t_seg
 
         self._initialized = True
         logger.info(f"Pipeline ready ({(t_lbl - t0)*1000:.0f}ms)")
@@ -134,7 +150,8 @@ class PipelineOrchestrator:
         if self._sam_thread and self._sam_thread.is_alive():
             self._sam_thread.join(timeout=5)
         self._segmenter.shutdown()
-        self._labeler.shutdown()
+        if self._labeler is not None:
+            self._labeler.shutdown()
         if self._metrics_log:
             self._metrics_log.close()
             self._metrics_log = None
@@ -222,14 +239,15 @@ class PipelineOrchestrator:
         self._sam_count = 1
         self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
-        # Kick Gemini
+        # Kick Gemini (legacy mode only — SAM3 segments arrive pre-labeled)
         now = time.time()
-        self._last_gemini_time = now
-        threading.Thread(
-            target=self._background_label,
-            args=(frame_bgr.copy(), list(new_segments), self._person_mask),
-            daemon=True,
-        ).start()
+        if self._labeler is not None:
+            self._last_gemini_time = now
+            threading.Thread(
+                target=self._background_label,
+                args=(frame_bgr.copy(), list(new_segments), self._person_mask),
+                daemon=True,
+            ).start()
 
         # Track with fresh SAM segments (labels come from tracks/Gemini)
         self._update_tracks(new_segments, now, fh, fw)
@@ -285,9 +303,9 @@ class PipelineOrchestrator:
                 self._sam_count += 1
                 self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
-                # 3. Kick Gemini if due
+                # 3. Kick Gemini if due (legacy mode only — SAM3 is pre-labeled)
                 now = time.time()
-                if now - self._last_gemini_time >= self._gemini_interval:
+                if self._labeler is not None and now - self._last_gemini_time >= self._gemini_interval:
                     self._last_gemini_time = now
                     threading.Thread(
                         target=self._background_label,

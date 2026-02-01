@@ -1,6 +1,6 @@
 """Server configuration."""
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -15,7 +15,22 @@ class ServerConfig:
     gpu_id: int = 0
     device: str = "cuda"  # "cuda" or "cpu"
 
-    # FastSAM (matches sam_gemini_voice.py defaults)
+    # Pipeline mode: "sam3" (default), "grounded-sam2", or "legacy"
+    pipeline_mode: str = "sam3"
+
+    # Grounded SAM2 (GroundingDINO detection + SAM2 masks — no API keys needed)
+    gdino_model: str = "IDEA-Research/grounding-dino-tiny"
+    sam2_model: str = "facebook/sam2-hiera-large"
+    gdino_box_threshold: float = 0.3
+    gdino_text_threshold: float = 0.25
+
+    # SAM3 (text-prompted segmentation — requires HF gated access)
+    sam3_model: str = "facebook/sam3"
+    sam3_prompts_per_frame: int = 2      # rotating prompts per frame (+ "person" every frame)
+    sam3_cache_ttl: float = 0.5          # mask cache lifetime in seconds
+    sam3_confidence_threshold: float = 0.3
+
+    # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
     fastsam_conf: float = 0.50           # higher = fewer fragments on textured objects (paintings/screens)
     fastsam_imgsz: int = 512            # matches original adaptive max (was 320)
