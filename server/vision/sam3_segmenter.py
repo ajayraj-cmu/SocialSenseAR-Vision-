@@ -911,14 +911,15 @@ class SAM3Segmenter:
             self._vision_skip_count += 1
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 4: Select prompts (person + N rotating) ---
-        object_prompts = [p for p in ALL_PROMPTS if p != "person"]
-        prompts_this_frame = ["person"]
-        n_rotating = min(self._prompts_per_frame, len(object_prompts))
-        for i in range(n_rotating):
-            idx = (self._rotate_index + i) % len(object_prompts)
-            prompts_this_frame.append(object_prompts[idx])
-        self._rotate_index = (self._rotate_index + n_rotating) % len(object_prompts)
+        # --- Step 4: Select prompts (N rotating from all prompts, person included) ---
+        # All prompts rotate equally — person refreshes every len(ALL_PROMPTS) frames
+        # (e.g. 13 frames × 26ms = 338ms, well within 4s cache TTL)
+        n = min(self._prompts_per_frame, len(ALL_PROMPTS))
+        prompts_this_frame = []
+        for i in range(n):
+            idx = (self._rotate_index + i) % len(ALL_PROMPTS)
+            prompts_this_frame.append(ALL_PROMPTS[idx])
+        self._rotate_index = (self._rotate_index + n) % len(ALL_PROMPTS)
 
         # --- Step 5: Decode all prompts (always fresh — no generation check needed) ---
         t_dec = time.perf_counter()
