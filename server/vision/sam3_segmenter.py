@@ -529,31 +529,51 @@ class SAM3Segmenter:
                 output_names.add(name)
         self._trt_topk = "best_mask" in output_names
 
+        # Read FPN shapes from meta (resolution-flexible) or use defaults
+        if self._trt_meta and "decoder_input_shapes" in self._trt_meta:
+            dec_in = self._trt_meta["decoder_input_shapes"]
+            fpn0_shape = dec_in.get("fpn_hs_0", [1, 256, 288, 288])
+            fpn1_shape = dec_in.get("fpn_hs_1", [1, 256, 144, 144])
+            fpn2_shape = dec_in.get("fpn_hs_2", [1, 256, 72, 72])
+        else:
+            fpn0_shape = [1, 256, 288, 288]
+            fpn1_shape = [1, 256, 144, 144]
+            fpn2_shape = [1, 256, 72, 72]
+
+        # Store for hot path (set_input_shape calls)
+        self._dec_fpn_shapes = {
+            "fpn_hs_0": fpn0_shape,
+            "fpn_hs_1": fpn1_shape,
+            "fpn_hs_2": fpn2_shape,
+            "fpn_pe_2": fpn2_shape,  # same spatial dims as fpn_hs_2
+            "text_embeds": [1, 32, 256],
+            "attention_mask": [1, 32],
+        }
+        mask_h, mask_w = fpn0_shape[2], fpn0_shape[3]
+        self._dec_mask_hw = (mask_h, mask_w)
+        logger.info(f"    Decoder FPN shapes: {fpn0_shape[2:]}/"
+                     f"{fpn1_shape[2:]}/{fpn2_shape[2:]}, mask={mask_h}x{mask_w}")
+
         if self._trt_topk:
             logger.info("    Engine type: top-k (best_mask + best_score)")
-            # Pre-allocate outputs for top-k engine
-            self._trt_out_mask = _torch.empty(1, 1, 288, 288, dtype=_torch.float32, device=self._device)
+            self._trt_out_mask = _torch.empty(1, 1, mask_h, mask_w, dtype=_torch.float32, device=self._device)
             self._trt_out_score = _torch.empty(1, dtype=_torch.float32, device=self._device)
         else:
             logger.info("    Engine type: full (pred_masks + pred_logits + presence_logits)")
-            self._trt_out_mask = _torch.empty(1, 200, 288, 288, dtype=_torch.float32, device=self._device)
+            self._trt_out_mask = _torch.empty(1, 200, mask_h, mask_w, dtype=_torch.float32, device=self._device)
             self._trt_out_logits = _torch.empty(1, 200, dtype=_torch.float32, device=self._device)
             self._trt_out_presence = _torch.empty(1, 1, dtype=_torch.float32, device=self._device)
 
-        # Warmup with batch=1
+        # Warmup with batch=1 (shapes from meta)
         ctx = self._trt_context
-        dummy_vis = _torch.zeros(1, 256, 288, 288, dtype=_torch.float32, device=self._device)
-        dummy_vis2 = _torch.zeros(1, 256, 144, 144, dtype=_torch.float32, device=self._device)
-        dummy_vis3 = _torch.zeros(1, 256, 72, 72, dtype=_torch.float32, device=self._device)
+        dummy_vis = _torch.zeros(*fpn0_shape, dtype=_torch.float32, device=self._device)
+        dummy_vis2 = _torch.zeros(*fpn1_shape, dtype=_torch.float32, device=self._device)
+        dummy_vis3 = _torch.zeros(*fpn2_shape, dtype=_torch.float32, device=self._device)
         dummy_te = _torch.zeros(1, 32, 256, dtype=_torch.float32, device=self._device)
         dummy_am = _torch.zeros(1, 32, dtype=_torch.int64, device=self._device)
 
-        ctx.set_input_shape("fpn_hs_0", [1, 256, 288, 288])
-        ctx.set_input_shape("fpn_hs_1", [1, 256, 144, 144])
-        ctx.set_input_shape("fpn_hs_2", [1, 256, 72, 72])
-        ctx.set_input_shape("fpn_pe_2", [1, 256, 72, 72])
-        ctx.set_input_shape("text_embeds", [1, 32, 256])
-        ctx.set_input_shape("attention_mask", [1, 32])
+        for name, shape in self._dec_fpn_shapes.items():
+            ctx.set_input_shape(name, shape)
 
         ctx.set_tensor_address("fpn_hs_0", dummy_vis.data_ptr())
         ctx.set_tensor_address("fpn_hs_1", dummy_vis2.data_ptr())
@@ -586,7 +606,7 @@ class SAM3Segmenter:
         # Pre-allocate persistent output buffers (max batch = len(ALL_PROMPTS))
         max_B = len(ALL_PROMPTS)
         if self._trt_topk:
-            self._trt_out_mask_persistent = _torch.empty(max_B, 1, 288, 288, dtype=_torch.float32, device=self._device)
+            self._trt_out_mask_persistent = _torch.empty(max_B, 1, mask_h, mask_w, dtype=_torch.float32, device=self._device)
             self._trt_out_score_persistent = _torch.empty(max_B, dtype=_torch.float32, device=self._device)
 
         self._trt_call_count = 0  # track calls for proactive context rebuild
@@ -632,6 +652,7 @@ class SAM3Segmenter:
         import json
         with open(meta_path) as f:
             meta = json.load(f)
+        self._trt_meta = meta  # Store for decoder init + resolution flexibility
 
         vis_shapes = meta["vision_output_shapes"]
         vis_names = meta["vision_output_names"]
@@ -643,11 +664,17 @@ class SAM3Segmenter:
             self._trt_vis_outputs[name] = _torch.empty(
                 shape, dtype=_torch.float32, device=self._device)
 
-        # Set input shape (batch=1, static)
-        self._trt_vis_context.set_input_shape("pixel_values", [1, 3, 1008, 1008])
+        # Override preprocessing target to match TRT engine's input resolution
+        pv_shape = meta["pixel_values_shape"]  # e.g. [1, 3, 784, 784]
+        self._img_target_h = pv_shape[2]
+        self._img_target_w = pv_shape[3]
+        logger.info(f"    TRT vision input resolution: {pv_shape[2]}x{pv_shape[3]}")
+
+        # Set input shape (from meta, resolution-flexible)
+        self._trt_vis_context.set_input_shape("pixel_values", pv_shape)
 
         # Warmup with dummy input
-        dummy_pv = _torch.zeros(1, 3, 1008, 1008, dtype=_torch.float32, device=self._device)
+        dummy_pv = _torch.zeros(*pv_shape, dtype=_torch.float32, device=self._device)
         self._trt_vis_context.set_tensor_address("pixel_values", dummy_pv.data_ptr())
         for name, tensor in self._trt_vis_outputs.items():
             self._trt_vis_context.set_tensor_address(name, tensor.data_ptr())
@@ -758,7 +785,7 @@ class SAM3Segmenter:
             self._last_thumb = thumb
             return True
         diff = np.mean(np.abs(thumb.astype(np.int16) - self._last_thumb.astype(np.int16)))
-        changed = diff > 8.0  # webcam noise ~3-6, real motion 10+
+        changed = diff > 12.0  # webcam noise ~5-11, deliberate motion 12+
         if self._frame_count <= 30 or self._frame_count % 20 == 0:
             _dbg(f"  frame_diff={diff:.1f} changed={changed}")
         if changed:
@@ -988,13 +1015,9 @@ class SAM3Segmenter:
 
         ctx = self._trt_context
 
-        # Set input shapes ONCE — all B=1, identical across prompts
-        ctx.set_input_shape("fpn_hs_0", [1, 256, 288, 288])
-        ctx.set_input_shape("fpn_hs_1", [1, 256, 144, 144])
-        ctx.set_input_shape("fpn_hs_2", [1, 256, 72, 72])
-        ctx.set_input_shape("fpn_pe_2", [1, 256, 72, 72])
-        ctx.set_input_shape("text_embeds", [1, 32, 256])
-        ctx.set_input_shape("attention_mask", [1, 32])
+        # Set input shapes ONCE — all B=1, identical across prompts (from meta)
+        for name, shape in self._dec_fpn_shapes.items():
+            ctx.set_input_shape(name, shape)
 
         # Set FPN addresses ONCE — same vision features for all prompts
         ctx.set_tensor_address("fpn_hs_0", fpn_hs_0.data_ptr())
@@ -1060,10 +1083,10 @@ class SAM3Segmenter:
         if passing:
             # Gather masks that passed confidence threshold from persistent buffers
             indices = [idx for idx, _ in passing]
-            masks_288 = self._trt_out_mask_persistent[indices]  # (K, 1, 288, 288)
+            masks_raw = self._trt_out_mask_persistent[indices]  # (K, 1, Hm, Wm)
 
             # Batch: threshold → resize → transfer (1 kernel + 1 D2H instead of K each)
-            masks_bool = (masks_288[:, 0] > 0.0).to(torch.uint8)  # (K, 288, 288)
+            masks_bool = (masks_raw[:, 0] > 0.0).to(torch.uint8)  # (K, Hm, Wm)
             masks_resized = torch.nn.functional.interpolate(
                 masks_bool.unsqueeze(1).float(), size=(h, w), mode='nearest'
             ).squeeze(1).to(torch.uint8) * 255  # (K, h, w)
@@ -1086,12 +1109,8 @@ class SAM3Segmenter:
         fpn_hs_0, fpn_hs_1, fpn_hs_2, fpn_pe_2 = self._get_fpn_fp32(vision_embeds)
 
         ctx = self._trt_context
-        ctx.set_input_shape("fpn_hs_0", [1, 256, 288, 288])
-        ctx.set_input_shape("fpn_hs_1", [1, 256, 144, 144])
-        ctx.set_input_shape("fpn_hs_2", [1, 256, 72, 72])
-        ctx.set_input_shape("fpn_pe_2", [1, 256, 72, 72])
-        ctx.set_input_shape("text_embeds", [1, 32, 256])
-        ctx.set_input_shape("attention_mask", [1, 32])
+        for name, shape in self._dec_fpn_shapes.items():
+            ctx.set_input_shape(name, shape)
 
         ctx.set_tensor_address("fpn_hs_0", fpn_hs_0.data_ptr())
         ctx.set_tensor_address("fpn_hs_1", fpn_hs_1.data_ptr())

@@ -28,11 +28,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 # ── Vision Encoder ──────────────────────────────────────────────────────────
 
-def export_vision_encoder(model, processor, device, output_dir):
+def export_vision_encoder(model, processor, device, output_dir, resolution=1008):
     """Export vision encoder to ONNX with flat tensor outputs.
 
     Sam3VisionEncoderOutput contains 9 tensors:
-      last_hidden_state          (1, 5184, 1024)
+      last_hidden_state          (1, N, 1024) where N = (resolution/14)^2
       fpn_hidden_states[0..3]    (1, 256, H, W) at 4 scales
       fpn_position_encoding[0..3](1, 256, H, W) at 4 scales
 
@@ -42,15 +42,21 @@ def export_vision_encoder(model, processor, device, output_dir):
     from PIL import Image
 
     logger.info("=" * 60)
-    logger.info("Exporting VISION ENCODER to ONNX")
+    logger.info(f"Exporting VISION ENCODER to ONNX (resolution={resolution})")
     logger.info("=" * 60)
 
-    # Sample input
-    dummy_img = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
-    inputs = processor(images=dummy_img, text="person", return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)
-    if device == "cuda":
-        pixel_values = pixel_values.half()
+    # Sample input at specified resolution (bypass processor's hardcoded size)
+    if resolution != 1008:
+        # Direct tensor creation at custom resolution
+        pixel_values = torch.randn(1, 3, resolution, resolution, device=device,
+                                   dtype=torch.float16 if device == "cuda" else torch.float32)
+        logger.info(f"  Using custom resolution: {resolution}x{resolution}")
+    else:
+        dummy_img = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+        inputs = processor(images=dummy_img, text="person", return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(device)
+        if device == "cuda":
+            pixel_values = pixel_values.half()
 
     pv_shape = list(pixel_values.shape)
     logger.info(f"  pixel_values: {pv_shape} {pixel_values.dtype}")
@@ -145,7 +151,7 @@ def export_vision_encoder(model, processor, device, output_dir):
 
 # ── Decoder Pipeline ────────────────────────────────────────────────────────
 
-def export_decoder(model, processor, device, output_dir, max_token_len):
+def export_decoder(model, processor, device, output_dir, max_token_len, resolution=1008):
     """Export decoder pipeline to ONNX.
 
     Inputs: 4 vision tensors (fpn_hs_0..2, fpn_pe_2) + text_embeds + attention_mask
@@ -159,15 +165,20 @@ def export_decoder(model, processor, device, output_dir, max_token_len):
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info("Exporting DECODER to ONNX")
+    logger.info(f"Exporting DECODER to ONNX (resolution={resolution})")
     logger.info("=" * 60)
 
-    # Get sample vision embeddings
+    # Get sample vision embeddings at specified resolution
     dummy_img = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
     inputs = processor(images=dummy_img, text="person", return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)
-    if device == "cuda":
-        pixel_values = pixel_values.half()
+
+    if resolution != 1008:
+        pixel_values = torch.randn(1, 3, resolution, resolution, device=device,
+                                   dtype=torch.float16 if device == "cuda" else torch.float32)
+    else:
+        pixel_values = inputs["pixel_values"].to(device)
+        if device == "cuda":
+            pixel_values = pixel_values.half()
 
     with torch.no_grad():
         vis = model.get_vision_features(pixel_values=pixel_values)
@@ -347,7 +358,7 @@ def export_decoder(model, processor, device, output_dir, max_token_len):
 
 # ── Top-1 Decoder (scoring + best-query mask only) ─────────────────────────
 
-def export_topk_decoder(model, processor, device, output_dir, max_token_len):
+def export_topk_decoder(model, processor, device, output_dir, max_token_len, resolution=1008):
     """Export decoder that selects best query and generates only 1 mask per prompt.
 
     Same inputs as full decoder, but internally:
@@ -362,15 +373,20 @@ def export_topk_decoder(model, processor, device, output_dir, max_token_len):
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info("Exporting TOP-1 DECODER to ONNX")
+    logger.info(f"Exporting TOP-1 DECODER to ONNX (resolution={resolution})")
     logger.info("=" * 60)
 
-    # Get sample tensors (same setup as export_decoder)
+    # Get sample tensors at specified resolution
     dummy_img = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
     inputs = processor(images=dummy_img, text="person", return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)
-    if device == "cuda":
-        pixel_values = pixel_values.half()
+
+    if resolution != 1008:
+        pixel_values = torch.randn(1, 3, resolution, resolution, device=device,
+                                   dtype=torch.float16 if device == "cuda" else torch.float32)
+    else:
+        pixel_values = inputs["pixel_values"].to(device)
+        if device == "cuda":
+            pixel_values = pixel_values.half()
 
     with torch.no_grad():
         vis = model.get_vision_features(pixel_values=pixel_values)
@@ -540,18 +556,9 @@ def save_metadata(output_dir, processor, pv_shape, vis_output_shapes,
                   dec_input_shapes, max_token_len):
     """Save metadata JSON for the runtime to reconstruct tensors."""
     ip = processor.image_processor
-    size = getattr(ip, 'size', {})
-    if isinstance(size, dict):
-        if 'height' in size and 'width' in size:
-            image_size = [size['height'], size['width']]
-        elif 'longest_edge' in size:
-            image_size = [size['longest_edge'], size['longest_edge']]
-        else:
-            image_size = list(pv_shape[2:])
-    elif isinstance(size, (list, tuple)):
-        image_size = list(size)
-    else:
-        image_size = list(pv_shape[2:])
+
+    # Use actual resolution from pixel_values_shape (not processor's hardcoded size)
+    image_size = list(pv_shape[2:])
 
     meta = {
         "pixel_values_shape": pv_shape,
@@ -577,8 +584,24 @@ def save_metadata(output_dir, processor, pv_shape, vis_output_shapes,
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse
     import torch
     from server.config import ServerConfig
+
+    parser = argparse.ArgumentParser(description="Export SAM3 to ONNX for TensorRT")
+    parser.add_argument("--resolution", type=int, default=1008,
+                        help="Input resolution (must be divisible by 14). Default: 1008. "
+                             "Try 784 for ~40%% fewer patches (faster) or 896 for ~21%% fewer.")
+    args = parser.parse_args()
+
+    resolution = args.resolution
+    if resolution % 14 != 0:
+        logger.error(f"Resolution {resolution} is not divisible by 14 (patch_size). "
+                     f"Nearest valid: {(resolution // 14) * 14} or {((resolution // 14) + 1) * 14}")
+        sys.exit(1)
+
+    patches = resolution // 14
+    logger.info(f"Resolution: {resolution}x{resolution} ({patches}x{patches} = {patches**2} patches)")
 
     config = ServerConfig()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -590,12 +613,21 @@ def main():
     logger.info(f"Output dir: {output_dir}")
     logger.info("")
 
-    from transformers import Sam3Model, Sam3Processor
+    from transformers import Sam3Model, Sam3Processor, Sam3Config
 
     logger.info("Loading SAM3 model and processor...")
     t0 = time.perf_counter()
     processor = Sam3Processor.from_pretrained(config.sam3_model)
-    model = Sam3Model.from_pretrained(config.sam3_model)
+
+    # Override vision_config.image_size so RoPE is computed for the target resolution
+    if resolution != 1008:
+        sam3_config = Sam3Config.from_pretrained(config.sam3_model)
+        sam3_config.vision_config.image_size = resolution
+        logger.info(f"Overriding vision config image_size: 1008 → {resolution}")
+        model = Sam3Model.from_pretrained(config.sam3_model, config=sam3_config)
+    else:
+        model = Sam3Model.from_pretrained(config.sam3_model)
+
     model.to(device).eval()
     if device == "cuda":
         model.half()
@@ -614,17 +646,17 @@ def main():
 
     # Export vision encoder
     vis_onnx, pv_shape, vis_shapes, vis_names = export_vision_encoder(
-        model, processor, device, output_dir)
+        model, processor, device, output_dir, resolution=resolution)
 
     # Export full decoder (for fallback)
     dec_onnx, dec_info, dec_names, dec_input_shapes = export_decoder(
-        model, processor, device, output_dir, max_token_len)
+        model, processor, device, output_dir, max_token_len, resolution=resolution)
 
     # Export top-1 decoder (scoring + best-query mask only — 200x less mask work)
     topk_onnx = export_topk_decoder(
-        model, processor, device, output_dir, max_token_len)
+        model, processor, device, output_dir, max_token_len, resolution=resolution)
 
-    # Save metadata
+    # Save metadata (includes resolution info via pv_shape and shapes)
     save_metadata(output_dir, processor, pv_shape, vis_shapes,
                   vis_names, dec_info, dec_names, dec_input_shapes, max_token_len)
 
