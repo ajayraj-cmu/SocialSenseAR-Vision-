@@ -100,6 +100,10 @@ class SAM3Segmenter:
         self._frame_count = 0
         self._decoder_skipped = False  # True if last frame used fully cached decoder
 
+        # Frame similarity check for vision skip (Phase 4)
+        self._last_thumb = None       # 64x64 thumbnail of previous frame
+        self._vision_skip_count = 0   # how many consecutive frames skipped vision
+
         # TRT engine backend (legacy .engine files)
         self._use_trt = False
         self._trt = None
@@ -121,6 +125,11 @@ class SAM3Segmenter:
         # Whether TRT engines are available (set in initialize())
         self._trt_vision_available = False
         self._trt_decoder_available = False
+
+        # TRT metadata (shapes from sam3_meta.json, resolution-flexible)
+        self._trt_meta = None
+        self._dec_fpn_shapes = None  # {name: [B,C,H,W]} for decoder input shapes
+        self._dec_mask_hw = (288, 288)  # mask output (H,W), updated from meta
 
         # Fast preprocessing (discovered from processor during init)
         self._img_target_h = 0
@@ -663,10 +672,9 @@ class SAM3Segmenter:
 
         ctx = self._trt_vis_context
         ctx.set_tensor_address("pixel_values", pv_f32.data_ptr())
-        for name, tensor in self._trt_vis_outputs.items():
-            ctx.set_tensor_address(name, tensor.data_ptr())
+        # Output addresses are pre-set during _init_trt_vision and never change
 
-        # Default CUDA stream (0) + full sync (same pattern as decoder NaN fix)
+        # Sync: ensure pixel_values.float() PyTorch op completes before TRT reads it
         torch.cuda.synchronize()
         ok = ctx.execute_async_v3(0)
         torch.cuda.synchronize()
@@ -736,6 +744,28 @@ class SAM3Segmenter:
         logger.info(f"    SAM3Segmenter ready (TRT backend)")
 
     # ------------------------------------------------------------------
+    # Frame similarity check (Phase 4 — vision skip)
+    # ------------------------------------------------------------------
+
+    def _frame_changed(self, frame_bgr: np.ndarray) -> bool:
+        """Compare 64x64 thumbnail to detect real motion vs webcam noise.
+
+        Returns True if the frame has changed enough to warrant re-running
+        the vision encoder. Cost: ~0.1ms (negligible vs 195ms vision encode).
+        """
+        thumb = cv2.resize(frame_bgr, (64, 64), interpolation=cv2.INTER_AREA)
+        if self._last_thumb is None:
+            self._last_thumb = thumb
+            return True
+        diff = np.mean(np.abs(thumb.astype(np.int16) - self._last_thumb.astype(np.int16)))
+        changed = diff > 8.0  # webcam noise ~3-6, real motion 10+
+        if self._frame_count <= 30 or self._frame_count % 20 == 0:
+            _dbg(f"  frame_diff={diff:.1f} changed={changed}")
+        if changed:
+            self._last_thumb = thumb  # only update on change to avoid drift
+        return changed
+
+    # ------------------------------------------------------------------
     # Fast image preprocessing (bypass PIL + HF processor)
     # ------------------------------------------------------------------
 
@@ -794,11 +824,11 @@ class SAM3Segmenter:
     # ------------------------------------------------------------------
 
     def segment_frame(self, frame_bgr: np.ndarray) -> list[SegmentData]:
-        """Run SAM3 on one BGR frame — fully synchronous pipeline.
+        """Run SAM3 on one BGR frame — synchronous pipeline with vision skip.
 
-        Flow: preprocess → vision encode (TRT or PyTorch) → select prompts →
-              decode (TRT or PyTorch) → build segments.
-        No async threads, no vision caching. Every frame gets fresh embeddings.
+        Flow: check frame similarity → (skip or run) vision encode →
+              select prompts → decode → build segments.
+        Vision encode (~195ms) skipped when frame is near-identical to previous.
         """
         if not self._initialized:
             self.initialize()
@@ -817,33 +847,44 @@ class SAM3Segmenter:
             raise
 
     def _segment_frame_inner(self, frame_bgr, torch, t0, h, w, now):
-        # --- Step 1: Preprocess ---
+        # --- Step 1: Check frame similarity (Phase 4 — vision skip) ---
+        frame_changed = self._frame_changed(frame_bgr)
+        force_refresh = (self._frame_count % 30 == 0)  # safety: full refresh every 30 frames
+        need_vision = frame_changed or self._cached_vision_embeds is None or force_refresh
+
+        # --- Step 2: Preprocess (only if vision needed) ---
         t_pre = time.perf_counter()
-        if self._use_trt:
-            pixel_values = self._trt.preprocess(frame_bgr)
-        elif self._fast_preprocess_ready:
-            pixel_values = self._preprocess_fast(frame_bgr)
-        else:
-            pixel_values = self._preprocess_slow(frame_bgr)
+        if need_vision:
+            if self._use_trt:
+                pixel_values = self._trt.preprocess(frame_bgr)
+            elif self._fast_preprocess_ready:
+                pixel_values = self._preprocess_fast(frame_bgr)
+            else:
+                pixel_values = self._preprocess_slow(frame_bgr)
         pre_ms = (time.perf_counter() - t_pre) * 1000
 
-        # --- Step 2: Vision encode (synchronous) ---
+        # --- Step 3: Vision encode (skip if frame unchanged) ---
         t_vis = time.perf_counter()
-        if self._use_trt_vision:
-            vision_embeds = self._run_vision_trt(pixel_values)
-        elif self._use_trt:
-            vision_embeds = self._trt.encode_vision(pixel_values)
-        else:
-            with torch.no_grad():
-                vision_embeds = self._model.get_vision_features(pixel_values=pixel_values)
-            # Clone needed for PyTorch — compiled model can overwrite tensor storage
-            vision_embeds = self._clone_vision_output(vision_embeds)
+        if need_vision:
+            if self._use_trt_vision:
+                vision_embeds = self._run_vision_trt(pixel_values)
+            elif self._use_trt:
+                vision_embeds = self._trt.encode_vision(pixel_values)
+            else:
+                with torch.no_grad():
+                    vision_embeds = self._model.get_vision_features(pixel_values=pixel_values)
+                # Clone needed for PyTorch — compiled model can overwrite tensor storage
+                vision_embeds = self._clone_vision_output(vision_embeds)
 
-        self._cached_vision_embeds = vision_embeds
-        self._cached_fpn_fp32 = None  # invalidate FP32 FPN cache
+            self._cached_vision_embeds = vision_embeds
+            self._cached_fpn_fp32 = None  # invalidate FP32 FPN cache
+            self._vision_skip_count = 0
+        else:
+            vision_embeds = self._cached_vision_embeds
+            self._vision_skip_count += 1
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 3: Select prompts (person + N rotating) ---
+        # --- Step 4: Select prompts (person + N rotating) ---
         object_prompts = [p for p in ALL_PROMPTS if p != "person"]
         prompts_this_frame = ["person"]
         n_rotating = min(self._prompts_per_frame, len(object_prompts))
@@ -852,7 +893,7 @@ class SAM3Segmenter:
             prompts_this_frame.append(object_prompts[idx])
         self._rotate_index = (self._rotate_index + n_rotating) % len(object_prompts)
 
-        # --- Step 4: Decode all prompts (always fresh — no generation check needed) ---
+        # --- Step 5: Decode all prompts (always fresh — no generation check needed) ---
         t_dec = time.perf_counter()
         new_masks = self._run_decoder(vision_embeds, prompts_this_frame, h, w)
         dec_ms = (time.perf_counter() - t_dec) * 1000
@@ -863,22 +904,24 @@ class SAM3Segmenter:
 
         self._decoder_skipped = False
 
-        # --- Step 5: Build segments from cache ---
+        # --- Step 6: Build segments from cache ---
         segments = self._build_segments(h, w, now)
 
         total_ms = (time.perf_counter() - t0) * 1000
+        vis_tag = "SKIP" if not need_vision else f"{vis_ms:.0f}"
         if self._frame_count <= 20 or self._frame_count % 10 == 0:
             _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
-                 f"(pre={pre_ms:.0f} vis={vis_ms:.0f} dec={dec_ms:.0f}) "
-                 f"{len(prompts_this_frame)}p {len(segments)}s")
+                 f"(pre={pre_ms:.0f} vis={vis_tag} dec={dec_ms:.0f}) "
+                 f"{len(prompts_this_frame)}p {len(segments)}s "
+                 f"vskip={self._vision_skip_count}")
         if self._frame_count % 30 == 0 or self._frame_count <= 3:
             backend = "TRT-vis+dec" if (self._use_trt_vision and self._use_trt_decoder) else \
                       "TRT-dec" if self._use_trt_decoder else \
                       ("TRT" if self._use_trt else ("batched" if self._batch_supported else "seq"))
             logger.info(
                 f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
-                f"(pre={pre_ms:.0f}, vis={vis_ms:.0f}, dec={dec_ms:.0f}) | "
-                f"{len(segments)} segs | {backend}"
+                f"(pre={pre_ms:.0f}, vis={vis_tag}, dec={dec_ms:.0f}) | "
+                f"{len(segments)} segs | {backend} | vskip={self._vision_skip_count}"
             )
 
         return segments
@@ -928,55 +971,56 @@ class SAM3Segmenter:
         return result
 
     def _run_decoder_trt_topk(self, vision_embeds, prompts: list[str], h: int, w: int) -> dict[str, np.ndarray | None]:
-        """Run top-k TRT decoder: sequential B=1 per prompt on default stream.
+        """Run top-k TRT decoder: sequential B=1 per prompt, optimized overhead.
 
-        Uses B=1 per prompt to avoid dynamic batch shape issues that cause NaN.
-        Uses default CUDA stream (0) with full synchronization to prevent races.
-        No proactive context rebuild — reactive NaN check handles edge cases.
+        Optimizations over naive per-prompt loop:
+        - Input shapes set ONCE (not per-prompt) — saves ~1.8ms
+        - FPN addresses set ONCE (not per-prompt) — saves ~1.5ms
+        - Single pre-sync before loop (not per-prompt) — saves ~2.5ms
+        - Each prompt writes to different persistent buffer slot
+        - Mask post-processing batched after all prompts — saves ~10ms
         """
         torch = self._torch
+        n = len(prompts)
 
         # Get cached FP32 FPN features (B=1)
         fpn_hs_0, fpn_hs_1, fpn_hs_2, fpn_pe_2 = self._get_fpn_fp32(vision_embeds)
 
-        # Use persistent output buffers (always B=1 slices)
-        out_mask = self._trt_out_mask_persistent[:1]
-        out_score = self._trt_out_score_persistent[:1]
+        ctx = self._trt_context
 
-        result = {}
+        # Set input shapes ONCE — all B=1, identical across prompts
+        ctx.set_input_shape("fpn_hs_0", [1, 256, 288, 288])
+        ctx.set_input_shape("fpn_hs_1", [1, 256, 144, 144])
+        ctx.set_input_shape("fpn_hs_2", [1, 256, 72, 72])
+        ctx.set_input_shape("fpn_pe_2", [1, 256, 72, 72])
+        ctx.set_input_shape("text_embeds", [1, 32, 256])
+        ctx.set_input_shape("attention_mask", [1, 32])
+
+        # Set FPN addresses ONCE — same vision features for all prompts
+        ctx.set_tensor_address("fpn_hs_0", fpn_hs_0.data_ptr())
+        ctx.set_tensor_address("fpn_hs_1", fpn_hs_1.data_ptr())
+        ctx.set_tensor_address("fpn_hs_2", fpn_hs_2.data_ptr())
+        ctx.set_tensor_address("fpn_pe_2", fpn_pe_2.data_ptr())
+
+        # Single sync: ensure _get_fpn_fp32 PyTorch ops complete before TRT
+        torch.cuda.synchronize()
+
         all_scores = []
 
-        for p in prompts:
+        for i, p in enumerate(prompts):
             te, am = self._text_embeds_fp32[p]
-
-            # No proactive context rebuild — B=1 + default stream + full sync prevents NaN.
-            # Reactive NaN check below handles any edge cases.
             self._trt_call_count += 1
 
-            ctx = self._trt_context
-
-            # Full CUDA sync before TRT execution — prevents cross-stream races
-            torch.cuda.synchronize()
-
-            ctx.set_input_shape("fpn_hs_0", [1, 256, 288, 288])
-            ctx.set_input_shape("fpn_hs_1", [1, 256, 144, 144])
-            ctx.set_input_shape("fpn_hs_2", [1, 256, 72, 72])
-            ctx.set_input_shape("fpn_pe_2", [1, 256, 72, 72])
-            ctx.set_input_shape("text_embeds", [1, 32, 256])
-            ctx.set_input_shape("attention_mask", [1, 32])
-
-            ctx.set_tensor_address("fpn_hs_0", fpn_hs_0.data_ptr())
-            ctx.set_tensor_address("fpn_hs_1", fpn_hs_1.data_ptr())
-            ctx.set_tensor_address("fpn_hs_2", fpn_hs_2.data_ptr())
-            ctx.set_tensor_address("fpn_pe_2", fpn_pe_2.data_ptr())
+            # Per-prompt: only text embeddings + output buffer addresses change
             ctx.set_tensor_address("text_embeds", te.data_ptr())
             ctx.set_tensor_address("attention_mask", am.data_ptr())
-            ctx.set_tensor_address("best_mask", out_mask.data_ptr())
-            ctx.set_tensor_address("best_score", out_score.data_ptr())
+            ctx.set_tensor_address("best_mask", self._trt_out_mask_persistent[i:i+1].data_ptr())
+            ctx.set_tensor_address("best_score", self._trt_out_score_persistent[i:i+1].data_ptr())
 
-            # Execute on default CUDA stream (0) for maximum safety
+            # Execute on default CUDA stream (0)
+            # No pre-sync needed: previous post-sync (or initial sync) guarantees GPU idle
             ok = ctx.execute_async_v3(0)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize()  # Must sync before reading score / changing addresses
 
             if not ok:
                 logger.warning(f"TRT decoder failed for '{p}', falling back to PyTorch")
@@ -985,10 +1029,10 @@ class SAM3Segmenter:
                     return self._run_decoder_batched(vision_embeds, prompts, h, w)
                 return self._run_decoder_sequential(vision_embeds, prompts, h, w)
 
-            score = out_score[0].item()
+            score = self._trt_out_score_persistent[i].item()
             all_scores.append(score)
 
-            # NaN check per prompt
+            # NaN check per prompt — reactive safety net
             if np.isnan(score):
                 _dbg(f"!!! NaN for prompt '{p}' at TRT call #{self._trt_call_count}, rebuilding context")
                 try:
@@ -1000,26 +1044,38 @@ class SAM3Segmenter:
                     return self._run_decoder_batched(vision_embeds, prompts, h, w)
                 return self._run_decoder_sequential(vision_embeds, prompts, h, w)
 
-            if score < self._confidence_threshold:
-                result[p] = None
-                continue
-
-            # Threshold + resize single mask
-            mask_bool = (out_mask[0, 0] > 0.0).to(torch.uint8)
-            mask_resized = torch.nn.functional.interpolate(
-                mask_bool.unsqueeze(0).unsqueeze(0).float(), size=(h, w), mode='nearest'
-            ).squeeze().to(torch.uint8) * 255
-            mask_u8 = mask_resized.cpu().numpy()
-
-            nz = cv2.countNonZero(mask_u8)
-            if nz < self.config.mask_min_area:
-                result[p] = None
-            else:
-                result[p] = mask_u8
-
         # Log scores
         score_info = ", ".join(f"{p}={all_scores[i]:.4f}" for i, p in enumerate(prompts))
         _dbg(f"TRT-topk F#{self._frame_count} scores: [{score_info}] calls={self._trt_call_count}")
+
+        # --- Batch post-process: threshold + resize + CPU transfer ---
+        result = {}
+        passing = []  # (buffer_index, prompt_name)
+        for i, p in enumerate(prompts):
+            if all_scores[i] < self._confidence_threshold:
+                result[p] = None
+            else:
+                passing.append((i, p))
+
+        if passing:
+            # Gather masks that passed confidence threshold from persistent buffers
+            indices = [idx for idx, _ in passing]
+            masks_288 = self._trt_out_mask_persistent[indices]  # (K, 1, 288, 288)
+
+            # Batch: threshold → resize → transfer (1 kernel + 1 D2H instead of K each)
+            masks_bool = (masks_288[:, 0] > 0.0).to(torch.uint8)  # (K, 288, 288)
+            masks_resized = torch.nn.functional.interpolate(
+                masks_bool.unsqueeze(1).float(), size=(h, w), mode='nearest'
+            ).squeeze(1).to(torch.uint8) * 255  # (K, h, w)
+            masks_cpu = masks_resized.cpu().numpy()
+
+            for k, (idx, p) in enumerate(passing):
+                mask_u8 = masks_cpu[k]
+                nz = cv2.countNonZero(mask_u8)
+                if nz < self.config.mask_min_area:
+                    result[p] = None
+                else:
+                    result[p] = mask_u8
 
         return result
 
