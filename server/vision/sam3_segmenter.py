@@ -179,8 +179,15 @@ class SAM3Segmenter:
         self._device = self.config.device
 
         # Detect TRT engines early (before init) so we can skip unnecessary VRAM usage
-        vis_engine = os.path.join(_PROJECT_ROOT, "sam3_vision.engine")
+        # Prefer INT8 engine over FP16 (better perf on Ampere+)
+        vis_engine_int8 = os.path.join(_PROJECT_ROOT, "sam3_vision_int8.engine")
+        vis_engine_fp16 = os.path.join(_PROJECT_ROOT, "sam3_vision.engine")
         meta_path = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
+        if os.path.exists(vis_engine_int8) and os.path.exists(meta_path):
+            vis_engine = vis_engine_int8
+            logger.info("    Using INT8 vision engine")
+        else:
+            vis_engine = vis_engine_fp16
         self._trt_vision_available = os.path.exists(vis_engine) and os.path.exists(meta_path)
 
         topk_engine = os.path.join(_PROJECT_ROOT, "sam3_topk_decoder.engine")

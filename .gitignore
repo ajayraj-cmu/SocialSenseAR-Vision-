@@ -80,3 +80,4 @@ Thumbs.db
 .env.bak
 .env.*
 *.env
+/calibration_frames
