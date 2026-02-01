@@ -386,6 +386,11 @@ class PipelineOrchestrator:
                 else:
                     small = cv2.resize(mask, (rle_w, rle_h), interpolation=cv2.INTER_LINEAR)
                     small_u8 = (small * 255).astype(np.uint8)
+                # Smooth mask edges before encoding
+                kernel = np.ones((5, 5), np.uint8)
+                small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_CLOSE, kernel)
+                small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_OPEN, kernel)
+                small_u8 = cv2.GaussianBlur(small_u8, (5, 5), 0)
                 seg.rle_mask = encode_rle((small_u8 > 128).astype(np.uint8))
                 seg.mask_width = rle_w
                 seg.mask_height = rle_h
