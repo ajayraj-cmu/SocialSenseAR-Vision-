@@ -186,21 +186,49 @@ class SAM3Segmenter:
         self._device = self.config.device
 
         # Detect TRT engines early (before init) so we can skip unnecessary VRAM usage
+        # Resolution-aware: look for _<res> suffixed files first, then unsuffixed fallback
+        res = self.config.sam3_resolution
+        logger.info(f"    SAM3 resolution: {res}x{res}")
+
+        def _find_engine(base_name):
+            """Find engine file: try _<res> suffix first, then unsuffixed."""
+            suffixed = os.path.join(_PROJECT_ROOT, f"{base_name}_{res}.engine")
+            unsuffixed = os.path.join(_PROJECT_ROOT, f"{base_name}.engine")
+            if os.path.exists(suffixed):
+                return suffixed
+            if os.path.exists(unsuffixed):
+                return unsuffixed
+            return None
+
+        def _find_meta():
+            """Find meta JSON: try _<res> suffix first, then unsuffixed."""
+            suffixed = os.path.join(_PROJECT_ROOT, f"sam3_meta_{res}.json")
+            unsuffixed = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
+            if os.path.exists(suffixed):
+                return suffixed
+            if os.path.exists(unsuffixed):
+                return unsuffixed
+            return None
+
         # Prefer INT8 engine over FP16 (better perf on Ampere+)
-        vis_engine_int8 = os.path.join(_PROJECT_ROOT, "sam3_vision_int8.engine")
-        vis_engine_fp16 = os.path.join(_PROJECT_ROOT, "sam3_vision.engine")
-        meta_path = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
-        if os.path.exists(vis_engine_int8) and os.path.exists(meta_path):
+        vis_engine_int8 = _find_engine("sam3_vision_int8")
+        vis_engine_fp16 = _find_engine("sam3_vision")
+        meta_path = _find_meta()
+        if vis_engine_int8 and meta_path:
             vis_engine = vis_engine_int8
-            logger.info("    Using INT8 vision engine")
+            logger.info(f"    Using INT8 vision engine: {os.path.basename(vis_engine)}")
         else:
             vis_engine = vis_engine_fp16
-        self._trt_vision_available = os.path.exists(vis_engine) and os.path.exists(meta_path)
+        self._trt_vision_available = vis_engine is not None and meta_path is not None
+        if vis_engine:
+            logger.info(f"    Vision engine: {os.path.basename(vis_engine)}")
+        if meta_path:
+            logger.info(f"    Meta: {os.path.basename(meta_path)}")
 
-        topk_engine = os.path.join(_PROJECT_ROOT, "sam3_topk_decoder.engine")
-        full_engine = os.path.join(_PROJECT_ROOT, "sam3_decoder.engine")
-        dec_engine_path = topk_engine if os.path.exists(topk_engine) else full_engine
-        self._trt_decoder_available = os.path.exists(dec_engine_path)
+        topk_path = _find_engine("sam3_topk_decoder")
+        full_path = _find_engine("sam3_decoder")
+        dec_engine_path = topk_path or full_path
+        self._trt_decoder_available = dec_engine_path is not None
 
         # Init PyTorch (skips torch.compile + warmup for components with TRT replacements)
         self._init_pytorch()

@@ -97,7 +97,7 @@ def export_vision_encoder(model, processor, device, output_dir, resolution=1008)
         logger.info(f"  {name}: {list(tensor.shape)} {tensor.dtype}")
 
     # Export in FP32 on CPU (GPU VRAM too small for FP32 tracing of 32-layer ViT)
-    onnx_path = os.path.join(output_dir, "sam3_vision.onnx")
+    onnx_path = os.path.join(output_dir, f"sam3_vision_{resolution}.onnx")
     logger.info(f"  Moving vision encoder to CPU for FP32 ONNX export...")
     t0 = time.perf_counter()
 
@@ -283,7 +283,7 @@ def export_decoder(model, processor, device, output_dir, max_token_len, resoluti
         logger.info(f"  Output '{name}': {list(tensor.shape)} {tensor.dtype}")
 
     # Export in FP32 on CPU (same reason as vision: VRAM too small for FP32 tracing)
-    onnx_path = os.path.join(output_dir, "sam3_decoder.onnx")
+    onnx_path = os.path.join(output_dir, f"sam3_decoder_{resolution}.onnx")
     logger.info(f"  Moving decoder to CPU for FP32 ONNX export...")
     t0 = time.perf_counter()
 
@@ -485,7 +485,7 @@ def export_topk_decoder(model, processor, device, output_dir, max_token_len, res
         logger.info(f"  Output '{name}': {list(tensor.shape)} {tensor.dtype}")
 
     # Export in FP32 on CPU
-    onnx_path = os.path.join(output_dir, "sam3_topk_decoder.onnx")
+    onnx_path = os.path.join(output_dir, f"sam3_topk_decoder_{resolution}.onnx")
     logger.info(f"  Moving to CPU for FP32 ONNX export...")
     t0 = time.perf_counter()
 
@@ -553,7 +553,7 @@ def export_topk_decoder(model, processor, device, output_dir, max_token_len, res
 
 def save_metadata(output_dir, processor, pv_shape, vis_output_shapes,
                   vis_output_names, dec_output_info, dec_output_names,
-                  dec_input_shapes, max_token_len):
+                  dec_input_shapes, max_token_len, resolution=1008):
     """Save metadata JSON for the runtime to reconstruct tensors."""
     ip = processor.image_processor
 
@@ -574,7 +574,7 @@ def save_metadata(output_dir, processor, pv_shape, vis_output_shapes,
         "do_rescale": getattr(ip, 'do_rescale', True),
     }
 
-    meta_path = os.path.join(output_dir, "sam3_meta.json")
+    meta_path = os.path.join(output_dir, f"sam3_meta_{resolution}.json")
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
     logger.info(f"\nMetadata saved: {meta_path}")
@@ -658,7 +658,8 @@ def main():
 
     # Save metadata (includes resolution info via pv_shape and shapes)
     save_metadata(output_dir, processor, pv_shape, vis_shapes,
-                  vis_names, dec_info, dec_names, dec_input_shapes, max_token_len)
+                  vis_names, dec_info, dec_names, dec_input_shapes, max_token_len,
+                  resolution=resolution)
 
     logger.info("")
     logger.info("=" * 60)

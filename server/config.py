@@ -26,6 +26,7 @@ class ServerConfig:
 
     # SAM3 (text-prompted segmentation — requires HF gated access)
     sam3_model: str = "facebook/sam3"
+    sam3_resolution: int = 1008          # TRT engine resolution: 1008 or 784 (must match exported engines)
     sam3_prompts_per_frame: int = 1      # prompts per frame (all rotate equally, cached when static)
     sam3_cache_ttl: float = 4.0          # mask cache lifetime — must outlast full rotation
     sam3_confidence_threshold: float = 0.12
