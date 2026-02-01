@@ -308,6 +308,9 @@ class PipelineOrchestrator:
                 self._sam_count += 1
                 self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
+                # 2. Check if SAM produced fresh masks or returned cached
+                decoder_skipped = getattr(self._segmenter, 'decoder_skipped', False)
+
                 # 3. Kick Gemini if due (legacy mode only — SAM3 is pre-labeled)
                 now = time.time()
                 if self._labeler is not None and now - self._last_gemini_time >= self._gemini_interval:
@@ -318,9 +321,7 @@ class PipelineOrchestrator:
                         daemon=True,
                     ).start()
 
-                # 4. Update tracks with NEW SAM segments (not old labelled ones).
-                # Labels transfer via tracks: tracks carry labels from Gemini,
-                # _get_tracked_output copies them onto the new segments.
+                # 4. Update tracks with segments (fresh or flow-tracked).
                 self._update_tracks(new_segments, now, fh, fw)
                 tracked = self._get_tracked_output(now, fh, fw)
 
@@ -334,10 +335,11 @@ class PipelineOrchestrator:
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
+                tracked_label = "T" if decoder_skipped else "S"
                 if self._sam_count % 10 == 0 or self._sam_count <= 3:
                     logger.info(
                         f"SAM #{self._sam_count}: {total_ms:.0f}ms total "
-                        f"({sam_ms:.0f}ms SAM), {len(tracked)} segs"
+                        f"({sam_ms:.0f}ms SAM)[{tracked_label}], {len(tracked)} segs"
                     )
                 # Track stability log — shows track IDs and labels every 50 cycles
                 if self._sam_count % 50 == 0:
