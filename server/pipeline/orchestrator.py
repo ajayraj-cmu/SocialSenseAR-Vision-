@@ -75,6 +75,7 @@ class PipelineOrchestrator:
         # Pre-decoded BGR frame from ws thread (overlaps decode with SAM GPU work)
         self._latest_frame: tuple | None = None  # (frame_bgr, fw, fh)
         self._latest_frame_lock = threading.Lock()
+        self._new_frame_event = threading.Event()  # Signal SAM loop on new frame
         self._sam_thread: threading.Thread | None = None
         self._sam_stop = threading.Event()
         self._sam_count = 0
@@ -187,6 +188,7 @@ class PipelineOrchestrator:
 
         with self._latest_frame_lock:
             self._latest_frame = (frame_bgr, fw, fh)
+        self._new_frame_event.set()  # Wake up SAM loop immediately
 
         # First frame — run SAM synchronously, then start continuous loop
         if self._cached_result is None:
@@ -279,13 +281,16 @@ class PipelineOrchestrator:
                 frame_tuple = self._latest_frame
 
             if frame_tuple is None:
-                time.sleep(0.005)
+                self._new_frame_event.wait(timeout=0.1)
+                self._new_frame_event.clear()
                 continue
 
             # Skip if same frame (no new frame from client)
             frame_id = id(frame_tuple)
             if frame_id == last_frame_id:
-                time.sleep(0.005)
+                # Wait for new frame signal instead of polling with sleep
+                self._new_frame_event.wait(timeout=0.1)
+                self._new_frame_event.clear()
                 continue
             last_frame_id = frame_id
 
@@ -297,7 +302,7 @@ class PipelineOrchestrator:
                 self._fw = fw
                 self._fh = fh
 
-                # 1. Run FastSAM (frame already decoded on ws thread)
+                # 1. Run SAM segmenter (frame already decoded on ws thread)
                 new_segments = self._segmenter.segment_frame(frame_bgr)
                 sam_ms = (time.perf_counter() - t0) * 1000
                 self._sam_count += 1
@@ -379,7 +384,6 @@ class PipelineOrchestrator:
                 else:
                     small = cv2.resize(mask, (rle_w, rle_h), interpolation=cv2.INTER_LINEAR)
                     small_u8 = (small * 255).astype(np.uint8)
-                small_u8 = cv2.GaussianBlur(small_u8, (5, 5), 0)
                 seg.rle_mask = encode_rle((small_u8 > 128).astype(np.uint8))
                 seg.mask_width = rle_w
                 seg.mask_height = rle_h

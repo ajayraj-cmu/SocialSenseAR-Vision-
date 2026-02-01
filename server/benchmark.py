@@ -93,20 +93,66 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
         async with websockets.connect(
             url, max_size=10 * 1024 * 1024, ping_interval=20, ping_timeout=60,
         ) as ws:
-            print(f"Connected. Running benchmark for {duration}s...")
+            print(f"Connected. Warming up server (torch.compile)...")
+
+            # --- Warmup phase: send frames until first response ---
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+            frame_id_counter = 0
+            warmup_start = time.perf_counter()
+            warmup_sent = 0
+            while True:
+                frame_id_counter += 1
+                if use_camera and grabber:
+                    frame, _ = grabber.get()
+                    if frame is None:
+                        frame = generate_synthetic_frame(w, h, frame_id_counter)
+                else:
+                    frame = generate_synthetic_frame(w, h, frame_id_counter)
+                frame_send = cv2.flip(frame, 0)
+                _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
+                msg = pb.ClientMessage()
+                msg.frame_id = frame_id_counter
+                msg.timestamp_ms = time.time() * 1000
+                msg.frame.jpeg_data = jpeg.tobytes()
+                msg.frame.width = w
+                msg.frame.height = h
+                msg.frame.quality = 70
+                await ws.send(msg.SerializeToString())
+                warmup_sent += 1
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=0.05)
+                    # Got first response — server is warm
+                    warmup_s = time.perf_counter() - warmup_start
+                    print(f"  Server warm ({warmup_s:.1f}s, {warmup_sent} frames). "
+                          f"Draining queue...")
+                    # Drain any queued responses
+                    drained = 1
+                    while True:
+                        try:
+                            await asyncio.wait_for(ws.recv(), timeout=0.1)
+                            drained += 1
+                        except asyncio.TimeoutError:
+                            break
+                    print(f"  Drained {drained} queued responses.")
+                    break
+                except asyncio.TimeoutError:
+                    pass  # Server still warming up, send another frame
+                if time.perf_counter() - warmup_start > 120:
+                    print("ERROR: Server warmup timed out after 120s")
+                    return None
+
+            print(f"Running benchmark for {duration}s...")
 
             # Metrics collection
             send_count = 0
             recv_count = 0
             send_deque: collections.deque[float] = collections.deque()
             rtts: list[float] = []
-            last_seg_signature = None
+            last_raw_response = None
             sam_update_times: list[float] = []
             time_series: list[dict] = []
             all_label_scores: list[float] = []
             last_fid = -1
-            frame_id_counter = 0
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
             latest_resp = None
 
             t_start = time.perf_counter()
@@ -114,7 +160,7 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
 
             # Receiver task
             async def receiver():
-                nonlocal recv_count, latest_resp, last_seg_signature
+                nonlocal recv_count, latest_resp, last_raw_response
                 try:
                     async for raw in ws:
                         t_recv = time.perf_counter()
@@ -123,15 +169,10 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
                         latest_resp = resp
                         recv_count += 1
 
-                        # Detect SAM updates
-                        n = len(resp.segments)
-                        if n > 0:
-                            s0 = resp.segments[0]
-                            sig = (n, round(s0.bbox.x_min, 3), round(s0.bbox.y_min, 3))
-                        else:
-                            sig = (0,)
-                        if sig != last_seg_signature:
-                            last_seg_signature = sig
+                        # Detect actual SAM updates: server sends identical cached
+                        # bytes between SAM cycles, new bytes when SAM produces data.
+                        if raw != last_raw_response:
+                            last_raw_response = raw
                             sam_update_times.append(t_recv)
 
                         # RTT
@@ -148,6 +189,16 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
 
             recv_task = asyncio.create_task(receiver())
 
+            # Pre-encode synthetic frames to eliminate per-frame JPEG encode overhead
+            pre_encoded_jpegs = []
+            if not use_camera:
+                for i in range(120):  # 2 seconds of unique frames at 60fps
+                    frame = generate_synthetic_frame(w, h, i)
+                    frame_send = cv2.flip(frame, 0)
+                    _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
+                    pre_encoded_jpegs.append(jpeg.tobytes())
+                print(f"  Pre-encoded {len(pre_encoded_jpegs)} synthetic frames")
+
             try:
                 while True:
                     elapsed = time.perf_counter() - t_start
@@ -161,19 +212,18 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
                             await asyncio.sleep(0.001)
                             continue
                         last_fid = fid
+                        frame_send = cv2.flip(frame, 0)
+                        _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
+                        jpeg_bytes = jpeg.tobytes()
                     else:
                         frame_id_counter += 1
-                        frame = generate_synthetic_frame(w, h, frame_id_counter)
                         fid = frame_id_counter
-
-                    # Flip for server (matches Quest orientation)
-                    frame_send = cv2.flip(frame, 0)
-                    _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
+                        jpeg_bytes = pre_encoded_jpegs[fid % len(pre_encoded_jpegs)]
 
                     msg = pb.ClientMessage()
                     msg.frame_id = fid
                     msg.timestamp_ms = time.time() * 1000
-                    msg.frame.jpeg_data = jpeg.tobytes()
+                    msg.frame.jpeg_data = jpeg_bytes
                     msg.frame.width = w
                     msg.frame.height = h
                     msg.frame.quality = 70
@@ -188,10 +238,11 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
                         last_report = now_pc
                         sec_elapsed = now_pc - t_start
 
-                        # SAM FPS
+                        # SAM FPS — rolling window (last 120 distinct updates)
                         if len(sam_update_times) >= 2:
-                            sam_dt = sam_update_times[-1] - sam_update_times[0]
-                            sam_fps = (len(sam_update_times) - 1) / sam_dt if sam_dt > 0 else 0
+                            window = sam_update_times[-120:]
+                            sam_dt = window[-1] - window[0]
+                            sam_fps = (len(window) - 1) / sam_dt if sam_dt > 0 else 0
                         else:
                             sam_fps = 0
 
@@ -220,8 +271,10 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
                             f"lq={lq:.2f}"
                         )
 
-                    # Throttle to ~30fps send rate
-                    await asyncio.sleep(1.0 / 30)
+                    # Precise 60fps send rate (busy-wait avoids Windows timer granularity)
+                    target_time = time.perf_counter() + 1.0 / 60
+                    while time.perf_counter() < target_time:
+                        await asyncio.sleep(0)  # yield to receiver task
 
             except KeyboardInterrupt:
                 print("\nStopped early")
@@ -236,8 +289,10 @@ async def run_benchmark(url, duration, use_camera, camera_idx, output_dir):
             total_elapsed = time.perf_counter() - t_start
 
             if len(sam_update_times) >= 2:
-                sam_dt = sam_update_times[-1] - sam_update_times[0]
-                final_sam_fps = (len(sam_update_times) - 1) / sam_dt if sam_dt > 0 else 0
+                # Use last 120 samples for steady-state SAM fps
+                window = sam_update_times[-120:]
+                sam_dt = window[-1] - window[0]
+                final_sam_fps = (len(window) - 1) / sam_dt if sam_dt > 0 else 0
             else:
                 final_sam_fps = 0
 

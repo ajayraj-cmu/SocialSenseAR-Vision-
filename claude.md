@@ -1,15 +1,16 @@
 # DIRECTIVE: SAM FPS Optimization (ACTIVE)
 
 ## Goal
-Achieve 40+ FPS on the segmentation pipeline (SAM-based). DO NOT GIVE UP.
+Achieve 30+ FPS on the segmentation pipeline (SAM3-based). DO NOT GIVE UP.
 
 ## Rules
 1. **MUST use SAM** — no switching away from SAM-family models entirely
-2. **Target: 40+ FPS** on the user's machine (Windows, RTX 3060 Laptop GPU, CUDA)
-3. **Iterate continuously** — spawn server, measure FPS, try next optimization, repeat
+2. **Target: 30+ FPS** on the user's machine (Windows, RTX 3060 Laptop GPU, CUDA)
+3. **Iterate continuously** — start server + client together, measure FPS, try next optimization, repeat
 4. **DO NOT sacrifice segmentation quality** — same model, same input, just faster execution
 5. **Do not enter plan mode** — just execute and test
-6. **Do not stop** until 40+ FPS is confirmed
+6. **Do not stop** until 30+ FPS is confirmed
+7. **Always test on real server** — `python -m server.main --device cuda` + `python -m server.test_client --show`
 
 ## CONSTRAINT: Quality Preservation
 - NO switching to lower-quality models (no MobileSAM, NanoSAM, etc.)
@@ -22,24 +23,30 @@ Achieve 40+ FPS on the segmentation pipeline (SAM-based). DO NOT GIVE UP.
   - Pipeline/Python overhead elimination
   - Custom CUDA post-processing kernels
 
-## Current State
-- FastSAM-s.pt runs at ~3 FPS (ultralytics YOLO-based, PyTorch)
+## Current State (SAM3)
+- **Model**: facebook/sam3 (~530M params) — text-prompted segmentation
+- **Current FPS**: ~12.3 FPS cached (81ms), ~1.9 FPS uncached (527ms)
+- **Backend**: PyTorch vision encoder (torch.compile FP16) + TensorRT top-k decoder
+- **Prompts**: "person" every frame + 1 rotating object prompt
+- **Vision cache**: MSE threshold 500, ~80% hit rate on real camera
 - Server: `python -m server.main --device cuda`
 - Client: `python -m server.test_client --show`
 - FPS displayed in client overlay top-left as "SAM X fps"
-- Key file: `server/vision/fastsam_segmenter.py`
+- Key file: `server/vision/sam3_segmenter.py`
+- TRT export: `server/vision/sam3_export.py`
+- TRT engine builder: `build_trt_engine.py`
+- Benchmark: `test_fps.py`
 - Config: `server/config.py`
 - Pipeline: `server/pipeline/orchestrator.py`
-- GPU: RTX 3060 Laptop (Ampere, compute 8.6, supports TRT/FP16/INT8)
+- GPU: RTX 3060 Laptop (Ampere, compute 8.6, 6GB VRAM)
 
-## Optimization Priority Order
-1. **TensorRT export** — compile FastSAM-s to TensorRT engine for 5-10x speedup (ZERO quality loss)
-2. **ONNX Runtime + CUDA EP** — alternative runtime, zero quality loss
-3. **torch.compile()** — PyTorch 2.x inductor backend, zero quality loss
-4. **FP16 inference** — halve memory bandwidth, near-zero quality loss
-5. **Pipeline optimization** — eliminate Python overhead in post-processing
-6. **Custom CUDA kernels** — for mask decode, NMS, used_pixels
-7. **C++ inference server** — eliminate GIL entirely
+## Optimization Priority Order (remaining)
+1. **Batch TRT prompts** — single batch=N call instead of N sequential calls
+2. **Cache FP32 FPN features** — skip FP16→FP32 conversion on vision cache hits
+3. **TensorRT vision encoder** — 280ms → 20-30ms (for uncached frames)
+4. **Split DETR encoder from decoder** — run DETR encoder once, decoder per prompt
+5. **Pipeline overlap** — decoder runs while next frame preprocesses
+6. **Custom CUDA kernels** — for mask decode, post-processing
 
 ## How to Test
 ```bash
@@ -49,4 +56,7 @@ python -m server.main --device cuda
 # Terminal 2 — client
 python -m server.test_client --show
 ```
-Watch "SAM X fps" in top-left of client window. Must show 40+.
+Watch "SAM X fps" in top-left of client window. Must show 30+.
+
+## Future Features (queued)
+- Text input in client to modify server behavior (e.g. "make person blue", "hide screen")

@@ -47,6 +47,7 @@ class FrameGrabber:
         self._cap = cv2.VideoCapture(camera_idx)
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._cap.set(cv2.CAP_PROP_FPS, 60)  # Request 60fps from webcam
         self._frame = None
         self._frame_id = 0
         self._lock = threading.Lock()
@@ -263,14 +264,15 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
             t_start = time.perf_counter()
             interval = 1.0 / target_fps
             last_sent_fid = -1
+            last_jpeg = None  # cached JPEG for re-sending between webcam frames
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
-            # SAM FPS tracking (detect actual segment changes)
-            last_seg_signature = None  # fingerprint of current segments
+            # SAM FPS tracking (detect actual SAM updates from server)
+            last_raw_response = None  # raw bytes of last response (changes when SAM updates)
             sam_update_times: list[float] = []
 
             # --- Receiver coroutine (runs concurrently) ---
             async def receiver():
-                nonlocal recv_count, latest_resp, last_seg_signature
+                nonlocal recv_count, latest_resp, last_raw_response
                 try:
                     async for raw in ws:
                         t_recv = time.perf_counter()
@@ -279,20 +281,12 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                         latest_resp = resp
                         recv_count += 1
 
-                        # Detect actual SAM updates by fingerprinting ALL segments.
-                        n = len(resp.segments)
-                        if n > 0:
-                            parts = [n]
-                            for s in resp.segments:
-                                parts.append(round(s.center_x, 2))
-                                parts.append(round(s.center_y, 2))
-                            sig = tuple(parts)
-                        else:
-                            sig = (0,)
-                        if sig != last_seg_signature:
-                            last_seg_signature = sig
+                        # Detect actual SAM updates: server sends identical cached
+                        # bytes between SAM cycles, new bytes when SAM produces data.
+                        if raw != last_raw_response:
+                            last_raw_response = raw
                             sam_update_times.append(t_recv)
-                            if len(sam_update_times) > 60:
+                            if len(sam_update_times) > 120:
                                 sam_update_times.pop(0)
 
                         # Round-trip time (FIFO — server responds in send order)
@@ -314,21 +308,24 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
 
                     # Grab latest camera frame
                     frame, fid = grabber.get()
-                    if frame is None or fid == last_sent_fid:
+                    if frame is None:
                         await asyncio.sleep(0.001)
                         continue
-                    last_sent_fid = fid
+                    if fid != last_sent_fid:
+                        # New frame from webcam — encode it
+                        last_sent_fid = fid
+                        frame_send = cv2.flip(frame, 0)
+                        _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
+                        last_jpeg = jpeg
+                    elif last_jpeg is None:
+                        await asyncio.sleep(0.001)
+                        continue
+                    # Re-send latest JPEG (maintains high frame rate even at 30fps webcam)
+                    jpeg = last_jpeg
 
-                    # Flip vertically to match Quest frame orientation
-                    # (server expects flipped frames and corrects them)
-                    frame_send = cv2.flip(frame, 0)
-
-                    # Encode JPEG
-                    _, jpeg = cv2.imencode(".jpg", frame_send, encode_params)
-
-                    # Build protobuf
+                    # Build protobuf (use send_count as frame_id so server sees unique frames)
                     msg = pb.ClientMessage()
-                    msg.frame_id = fid
+                    msg.frame_id = send_count + 1
                     msg.timestamp_ms = time.time() * 1000
                     msg.frame.jpeg_data = jpeg.tobytes()
                     msg.frame.width = w
@@ -409,11 +406,10 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int):
                             f"Frames: {send_count}"
                         )
 
-                    # Throttle to target FPS
-                    loop_time = time.perf_counter() - t_loop
-                    remaining = interval - loop_time
-                    if remaining > 0:
-                        await asyncio.sleep(remaining)
+                    # Throttle to target FPS (busy-wait to avoid Windows timer granularity)
+                    target_time = t_loop + interval
+                    while time.perf_counter() < target_time:
+                        await asyncio.sleep(0)
 
             except KeyboardInterrupt:
                 print("\nStopped by user")

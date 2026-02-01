@@ -28,7 +28,7 @@ class ServerConfig:
     sam3_model: str = "facebook/sam3"
     sam3_prompts_per_frame: int = 3      # rotating prompts per frame (+ "person" every frame)
     sam3_cache_ttl: float = 5.0          # mask cache lifetime — must outlast full rotation
-    sam3_confidence_threshold: float = 0.3
+    sam3_confidence_threshold: float = 0.12
 
     # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
@@ -48,7 +48,7 @@ class ServerConfig:
     gemini_label_cache_ttl: float = 30.0  # seconds
 
     # Mask refinement
-    mask_min_area: int = 4000           # minimum pixel count — suppresses small fragments of textured objects
+    mask_min_area: int = 500            # minimum pixel count — suppresses small fragments
     mask_refine_grabcut: bool = False   # OFF — GrabCut adds ~400ms per mask, too slow for realtime
 
     # Emotion detection
