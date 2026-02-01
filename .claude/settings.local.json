@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(wc:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(huggingface-cli login:*)",
+      "WebSearch",
+      "Bash(pip install:*)"
     ]
   }
 }

@@ -1,15 +1,26 @@
+# SocialSenseAR Vision Server
+# Install: pip install -r requirements.txt
+#
+# IMPORTANT: torch must be installed separately with CUDA support:
+#   pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#
+# HuggingFace login (needed for gated models like facebook/sam3):
+#   python -c "from huggingface_hub import login; login(token='hf_YOUR_TOKEN_HERE')"
+
 # Core
 websockets>=12.0
 protobuf>=4.25.0
 python-dotenv>=1.0.0
-numpy>=1.24.0
+numpy>=1.24.0,<3.0.0
 opencv-python>=4.8.0
 
-# ML / Vision
-torch>=2.1.0
-torchvision>=0.16.0
-ultralytics>=8.0.0
+# ML / Vision — SAM3 requires transformers>=5.0.0
+transformers>=5.0.0
+huggingface-hub>=1.3.0,<2.0.0
+tokenizers>=0.22.0
+safetensors>=0.4.3
 Pillow>=10.0.0
+scikit-learn>=1.5.0
 
 # Gemini Vision
 google-generativeai>=0.3.0

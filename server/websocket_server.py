@@ -229,19 +229,12 @@ class SocialSenseServer:
             if mask.shape[:2] != (h, w):
                 mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
             mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
-            # Smooth mask before contour extraction
-            kernel = np.ones((7, 7), np.uint8)
-            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
-            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
-            mask_u8 = cv2.GaussianBlur(mask_u8, (7, 7), 0)
-            _, mask_u8 = cv2.threshold(mask_u8, 128, 255, cv2.THRESH_BINARY)
-            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            # Filter small contour fragments and smooth remaining contours
-            contours = [cv2.approxPolyDP(c, 3.0, True) for c in contours if cv2.contourArea(c) > 1000]
+            contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 continue
             color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
-            cv2.drawContours(frame, contours, -1, color, 3)
+            cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)  # black border for contrast
+            cv2.drawContours(frame, contours, -1, color, 2)
             label = seg.label or seg.asset_class or ""
             if label:
                 cx = int(seg.center_x * w)

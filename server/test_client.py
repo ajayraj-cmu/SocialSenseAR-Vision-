@@ -386,9 +386,8 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
 
         mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
 
-        # Find contours — filter small fragments
-        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = [c for c in contours if cv2.contourArea(c) > 500]
+        # Find contours (masks are already smoothed during RLE encoding)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
 
@@ -399,10 +398,10 @@ def draw_overlay_fast(frame, resp, debug_mode: bool):
         # Stable color from track_id (consistent across frames)
         color_idx = hash(seg.track_id) if seg.track_id else i
         border_color = BRIGHT_COLORS[color_idx % len(BRIGHT_COLORS)]
-        border_width = 2
 
-        # Draw contour outlines
-        cv2.drawContours(frame, contours, -1, border_color, border_width)
+        # Draw contour outlines with black border for contrast
+        cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)
+        cv2.drawContours(frame, contours, -1, border_color, 2)
 
         # Draw label at segment center with collision avoidance
         if display_label:
