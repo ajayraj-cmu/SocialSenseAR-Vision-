@@ -843,12 +843,14 @@ class SAM3Segmenter:
         self._cached_fpn_fp32 = None  # invalidate FP32 FPN cache
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 3: Select prompts (person + 1 rotating) ---
+        # --- Step 3: Select prompts (person + N rotating) ---
         object_prompts = [p for p in ALL_PROMPTS if p != "person"]
         prompts_this_frame = ["person"]
-        idx = self._rotate_index % len(object_prompts)
-        prompts_this_frame.append(object_prompts[idx])
-        self._rotate_index = (self._rotate_index + 1) % len(object_prompts)
+        n_rotating = min(self._prompts_per_frame, len(object_prompts))
+        for i in range(n_rotating):
+            idx = (self._rotate_index + i) % len(object_prompts)
+            prompts_this_frame.append(object_prompts[idx])
+        self._rotate_index = (self._rotate_index + n_rotating) % len(object_prompts)
 
         # --- Step 4: Decode all prompts (always fresh — no generation check needed) ---
         t_dec = time.perf_counter()
