@@ -135,7 +135,7 @@ Both eyes project from `_LeftCameraWorldPos` → identical UVs → zero disparit
 **Labels — Inverse Pinhole**:
 ```csharp
 float px = seg.CenterX * actualW;
-float py = (1f - seg.CenterY) * actualH;  // FLIP Y: OpenCV (0=top) → shader convention
+float py = (1f - seg.CenterY) * actualH;  // FLIP Y: OpenCV (0=top) → Unity texture (0=bottom)
 float dx = (px - PP.x) / focal.x;
 float dy = (py - PP.y) / focal.y;
 Vector3 localDir = new Vector3(dx, dy, 1f).normalized;
@@ -183,7 +183,7 @@ Quest camera (correct orientation)
       → pinhole vPixel increases with localDir.y (up in Unity)
       → high vPixel → high UV.y → top of Unity texture → top of original image ✓
   → Labels: MUST use (1 - CenterY) before inverse pinhole
-      → CenterY=0 (OpenCV top) → py = 1.0 * height → high pixel → correct upward direction
+      → CenterY=0 (OpenCV top) needs to map to UV.y=1 (Unity texture top)
 ```
 
 ### Why `_RightEyeOffset` Can't Fix Periphery
