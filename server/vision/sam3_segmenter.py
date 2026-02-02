@@ -1027,14 +1027,22 @@ class SAM3Segmenter:
         self._rotate_index = (self._rotate_index + n) % len(ALL_PROMPTS)
 
         # --- Step 6: Decode prompts ---
-        # On motion frames, only decode person + current rotating prompt(s).
-        # Other cached masks stay valid and refresh via rotation cycle.
-        # This keeps motion-frame decoder to 2 prompts × ~26ms = ~52ms.
+        # When vision features change (new frame content), re-decode ALL prompts
+        # that have visible masks in cache. This ensures every mask in the response
+        # is from the same vision embedding, preventing partial-update snapping
+        # when stale masks from old frames are mixed with fresh ones.
         t_dec = time.perf_counter()
         if need_vision:
             prompts_to_decode = list(prompts_this_frame)
             if "person" not in prompts_to_decode:
                 prompts_to_decode.insert(0, "person")
+            # Re-decode all prompts with visible cached masks for consistency
+            for p in list(self._mask_cache.keys()):
+                if p in prompts_to_decode:
+                    continue
+                mask_u8, ts, _gen = self._mask_cache[p]
+                if mask_u8 is not None and now - ts <= self._cache_ttl:
+                    prompts_to_decode.append(p)
             new_masks = self._run_decoder(vision_embeds, prompts_to_decode, h, w)
         else:
             # Scene unchanged — skip decoder for prompts with fresh cache
