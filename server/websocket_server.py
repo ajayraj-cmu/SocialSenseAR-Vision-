@@ -139,7 +139,7 @@ class SocialSenseServer:
         response = pb.ServerMessage()
         response.frame_id = msg.frame_id
         response.masks_frame_id = result.masks_frame_id
-        response.masks_updated = True
+        response.masks_updated = not getattr(result, 'decoder_skipped', True)
         response.timestamp_ms = time.time() * 1000
 
         for seg in result.segments:

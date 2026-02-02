@@ -34,14 +34,16 @@ logger = logging.getLogger(__name__)
 
 class PipelineResult:
     """Return value of process_frame()."""
-    __slots__ = ("segments", "fastsam_ms", "gemini_ms", "total_ms", "masks_frame_id")
+    __slots__ = ("segments", "fastsam_ms", "gemini_ms", "total_ms",
+                 "masks_frame_id", "decoder_skipped")
 
     def __init__(self):
         self.segments: list[SegmentData] = []
         self.fastsam_ms: float = 0
         self.gemini_ms: float = 0
         self.total_ms: float = 0
-        self.masks_frame_id: int = 0  # frame_id that SAM actually processed
+        self.masks_frame_id: int = 0  # frame_id when SAM decoder last ran
+        self.decoder_skipped: bool = False  # True when SAM returned cached masks
 
 
 class PipelineOrchestrator:
@@ -336,7 +338,15 @@ class PipelineOrchestrator:
                 result = PipelineResult()
                 result.segments = tracked
                 result.fastsam_ms = sam_ms
-                result.masks_frame_id = sam_frame_id
+                result.decoder_skipped = decoder_skipped
+                # Only update masks_frame_id when decoder actually ran (fresh masks).
+                # When decoder is skipped, masks are from a previous frame — keep old ID.
+                if not decoder_skipped:
+                    result.masks_frame_id = sam_frame_id
+                elif self._cached_result is not None:
+                    result.masks_frame_id = self._cached_result.masks_frame_id
+                else:
+                    result.masks_frame_id = sam_frame_id
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
