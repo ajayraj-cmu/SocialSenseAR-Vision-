@@ -1064,6 +1064,7 @@ class SAM3Segmenter:
             self._mask_cache[prompt] = (mask_u8, now, self._frame_count)
 
         self._decoder_skipped = (len(new_masks) == 0)
+        self._vision_ran = need_vision
 
         # --- Step 7: Build segments from cache ---
         segments = self._build_segments(h, w, now)

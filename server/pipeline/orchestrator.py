@@ -314,8 +314,13 @@ class PipelineOrchestrator:
                 self._sam_count += 1
                 self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
 
-                # 2. Check if SAM produced fresh masks or returned cached
-                decoder_skipped = getattr(self._segmenter, 'decoder_skipped', False)
+                # 2. Check if SAM ran fresh vision encoding.
+                # decoder_skipped=True when vision didn't run — masks are from a
+                # previous vision frame and should NOT trigger a Quest overlay update.
+                # This prevents stale masks (decoded with old vision features) from
+                # being projected with the wrong capture rotation.
+                vision_ran = getattr(self._segmenter, '_vision_ran', False)
+                decoder_skipped = not vision_ran
 
                 # 3. Kick Gemini if due (legacy mode only — SAM3 is pre-labeled)
                 now = time.time()
@@ -339,9 +344,10 @@ class PipelineOrchestrator:
                 result.segments = tracked
                 result.fastsam_ms = sam_ms
                 result.decoder_skipped = decoder_skipped
-                # Only update masks_frame_id when decoder actually ran (fresh masks).
-                # When decoder is skipped, masks are from a previous frame — keep old ID.
-                if not decoder_skipped:
+                # Only update masks_frame_id when vision encoder ran (fresh features).
+                # When vision was skipped, masks correspond to the previous vision
+                # frame — keep old ID so Quest uses the correct capture rotation.
+                if vision_ran:
                     result.masks_frame_id = sam_frame_id
                 elif self._cached_result is not None:
                     result.masks_frame_id = self._cached_result.masks_frame_id
@@ -350,7 +356,7 @@ class PipelineOrchestrator:
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
-                tracked_label = "T" if decoder_skipped else "S"
+                tracked_label = "Vcache" if decoder_skipped else "Vfresh"
                 if self._sam_count % 10 == 0 or self._sam_count <= 3:
                     logger.info(
                         f"SAM #{self._sam_count}: {total_ms:.0f}ms total "

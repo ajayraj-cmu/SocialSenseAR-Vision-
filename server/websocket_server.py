@@ -56,7 +56,9 @@ class SocialSenseServer:
     async def _handle_client(self, websocket):
         """Handle a single Quest client connection."""
         remote = websocket.remote_address
-        logger.info(f"Client connected: {remote}")
+        logger.info(f"Client connected: {remote} (id={id(websocket):#x})")
+        if self._client is not None:
+            logger.warning(f"REPLACING existing client {id(self._client):#x} with new {id(websocket):#x}")
         self._client = websocket
         self._frame_count = 0
         self._start_time = time.time()
@@ -68,12 +70,13 @@ class SocialSenseServer:
             async for raw_message in websocket:
                 await self._handle_message(websocket, raw_message)
         except websockets.exceptions.ConnectionClosed as e:
-            logger.info(f"Client disconnected: {e}")
+            logger.info(f"Client disconnected: {e} code={e.code} reason='{e.reason}' frames={self._frame_count}")
         except Exception as e:
             logger.error(f"Client error: {e}", exc_info=True)
         finally:
             self._client = None
-            logger.info("Client session ended")
+            elapsed = time.time() - self._start_time
+            logger.info(f"Client session ended: {self._frame_count} frames in {elapsed:.1f}s")
 
     async def _handle_message(self, websocket, raw_message: bytes):
         """Parse and dispatch a client message."""
