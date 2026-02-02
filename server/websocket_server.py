@@ -7,6 +7,11 @@ Uses protobuf for structured messaging instead of raw frame bytes.
 - process_frame() called directly (no thread pool for cached frames)
 - Serialized protobuf response cached and reused when segments unchanged
 - Only rebuilds protobuf when pipeline produces new data
+
+Dashboard:
+- Always shows camera feed + mask overlays when client is connected
+- Right panel: active prompts, detected segments, stats
+- Bottom bar: type commands directly (blur/unblur/clear) — click window first
 """
 import asyncio
 import time
@@ -23,6 +28,7 @@ class SocialSenseServer:
 
     Handles one client at a time (the Quest headset).
     Receives JPEG frames + audio, runs ML pipeline, returns protobuf results.
+    Shows a live dashboard window when frames are arriving.
     """
 
     def __init__(self, config: ServerConfig, pipeline=None):
@@ -34,9 +40,16 @@ class SocialSenseServer:
 
         # Cached serialized response (reused when segments haven't changed)
         self._cached_response_bytes: bytes = b""
-        self._cached_response = None  # pb.ServerMessage for debug view
+        self._cached_response = None  # pb.ServerMessage for dashboard
         self._cached_segments_id: int = 0  # id() of the segments list
-        self._last_screenshot_time: float = 0.0  # for periodic screenshot saving
+        self._last_screenshot_time: float = 0.0
+
+        # Mask FPS tracking — timestamps of actual SAM mask updates
+        self._mask_update_times: list[float] = []
+
+        # Dashboard keyboard input state
+        self._input_text: str = ""
+        self._input_log: list[str] = []  # last N executed commands
 
     async def run(self):
         """Start the WebSocket server."""
@@ -51,6 +64,11 @@ class SocialSenseServer:
             ping_timeout=60,
         ):
             logger.info("Server ready. Waiting for Quest connection...")
+            logger.info("Dashboard opens automatically when client connects.")
+            if self.pipeline is not None:
+                # Console fallback for when no cv2 window is focused
+                logger.info("Console fallback: blur <obj>, unblur <obj>, clear, list, help")
+                asyncio.create_task(self._console_command_loop())
             await asyncio.Future()  # run forever
 
     async def _handle_client(self, websocket):
@@ -125,7 +143,7 @@ class SocialSenseServer:
         if seg_id == self._cached_segments_id and self._cached_response_bytes:
             # Segments unchanged — reuse cached serialized bytes
             wall_ms = (time.perf_counter() - t_wall) * 1000
-            if self._frame_count % 60 == 0:
+            if self._frame_count % 120 == 0:
                 elapsed = time.time() - self._start_time
                 fps = self._frame_count / elapsed if elapsed > 0 else 0
                 logger.info(
@@ -133,8 +151,10 @@ class SocialSenseServer:
                     f"{fps:.1f} fps"
                 )
             # Show live feed even for cached frames (every 3rd frame to stay smooth)
-            if self.config.debug_view and self._frame_count % 3 == 0 and self._cached_response:
-                self._show_debug_view(msg.frame.jpeg_data, self._cached_response)
+            if self._frame_count % 3 == 0 and self._cached_response:
+                self._show_dashboard(msg.frame.jpeg_data, self._cached_response)
+            else:
+                self._poll_keys()  # always service window + keyboard
             return self._cached_response_bytes
 
         # Segments changed — rebuild protobuf response
@@ -194,7 +214,13 @@ class SocialSenseServer:
         self._cached_response = response
         self._cached_segments_id = seg_id
 
-        if self._frame_count % 60 == 0 or self._frame_count <= 2:
+        # Track mask update time for Mask FPS calculation
+        now = time.perf_counter()
+        self._mask_update_times.append(now)
+        if len(self._mask_update_times) > 120:
+            self._mask_update_times.pop(0)
+
+        if self._frame_count % 120 == 0 or self._frame_count <= 2:
             elapsed = time.time() - self._start_time
             fps = self._frame_count / elapsed if elapsed > 0 else 0
             logger.info(
@@ -203,10 +229,13 @@ class SocialSenseServer:
                 f"{len(response.segments)} segs, {fps:.1f} fps"
             )
 
-        if self.config.debug_view:
-            self._show_debug_view(msg.frame.jpeg_data, response)
+        self._show_dashboard(msg.frame.jpeg_data, response)
 
         return response_bytes
+
+    # ------------------------------------------------------------------
+    # Dashboard — always-on when client is connected
+    # ------------------------------------------------------------------
 
     _BRIGHT_COLORS = [
         (0, 255, 255), (255, 0, 255), (0, 255, 0), (255, 255, 0),
@@ -214,8 +243,17 @@ class SocialSenseServer:
         (0, 200, 100), (100, 255, 200),
     ]
 
-    def _show_debug_view(self, jpeg_data: bytes, response: pb.ServerMessage):
-        """Decode Quest frame and draw mask overlays in a cv2 window."""
+    _PANEL_W = 220       # right panel width
+    _INPUT_BAR_H = 40    # bottom input bar height
+    _PANEL_BG = (30, 30, 30)
+    _INPUT_BG = (20, 20, 20)
+    _HEADER_COLOR = (0, 200, 255)   # orange-yellow headers
+    _TEXT_COLOR = (200, 200, 200)    # light grey text
+    _ACTIVE_COLOR = (0, 255, 150)   # green for active prompts
+    _CURSOR_COLOR = (0, 200, 255)
+
+    def _show_dashboard(self, jpeg_data: bytes, response: pb.ServerMessage):
+        """Render full dashboard: camera + overlays + status panel + input bar."""
         import numpy as np
         import cv2
         from server.encoding.rle import decode_rle
@@ -226,39 +264,222 @@ class SocialSenseServer:
             return
         frame = cv2.flip(frame, 0)
 
-        h, w = frame.shape[:2]
+        fh, fw = frame.shape[:2]
+
+        # --- Draw mask overlays on frame (skip low-confidence) ---
         for i, seg in enumerate(response.segments):
             if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
                 continue
+            if seg.confidence < 0.75:
+                continue
             mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
-            if mask.shape[:2] != (h, w):
-                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+            if mask.shape[:2] != (fh, fw):
+                mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_LINEAR)
             mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 continue
             color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
-            cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)  # black border for contrast
+            cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)
             cv2.drawContours(frame, contours, -1, color, 2)
             label = seg.label or seg.asset_class or ""
             if label:
-                cx = int(seg.center_x * w)
-                cy = int(seg.center_y * h)
+                cx = int(seg.center_x * fw)
+                cy = int(seg.center_y * fh)
                 (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 cv2.rectangle(frame, (cx - 3, cy - th_ - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
                 cv2.putText(frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-        cv2.imshow("Quest Debug View", frame)
-        cv2.waitKey(1)
+        # --- Build canvas: frame | panel (top), input bar (bottom) ---
+        pw = self._PANEL_W
+        ibh = self._INPUT_BAR_H
+        canvas_w = fw + pw
+        canvas_h = fh + ibh
+        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
 
-        # Auto-save screenshot every 5 seconds for iteration
+        # Paste frame
+        canvas[0:fh, 0:fw] = frame
+
+        # --- Right panel ---
+        panel = canvas[0:fh, fw:fw + pw]
+        panel[:] = self._PANEL_BG
+
+        y = 20
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Active prompts
+        cv2.putText(panel, "ACTIVE PROMPTS", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+        y += 5
+        cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+        y += 18
+
+        active = set()
+        if self.pipeline is not None:
+            active = self.pipeline.get_active_prompts()
+        if active:
+            for p in sorted(active):
+                cv2.putText(panel, f"> {p}", (12, y), font, 0.4, self._ACTIVE_COLOR, 1, cv2.LINE_AA)
+                y += 18
+        else:
+            cv2.putText(panel, "(none)", (12, y), font, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
+            y += 18
+
+        y += 10
+
+        # Detected segments
+        cv2.putText(panel, "DETECTED", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+        y += 5
+        cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+        y += 18
+
+        shown_segs = [s for s in response.segments if s.confidence >= 0.75]
+        if shown_segs:
+            for i, seg in enumerate(shown_segs):
+                label = seg.label or seg.asset_class or "?"
+                conf = seg.confidence
+                color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
+                text = f"{label} ({conf:.2f})"
+                cv2.putText(panel, text, (12, y), font, 0.35, color, 1, cv2.LINE_AA)
+                y += 16
+        else:
+            cv2.putText(panel, "(none)", (12, y), font, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
+            y += 16
+
+        y += 10
+
+        # Stats
+        cv2.putText(panel, "STATS", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+        y += 5
+        cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+        y += 18
+
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        ws_fps = self._frame_count / elapsed if elapsed > 0 else 0
+        n_segs = len(response.segments)
+
+        # Mask FPS from recent update timestamps
+        mts = self._mask_update_times
+        if len(mts) >= 2:
+            dt = mts[-1] - mts[0]
+            mask_fps = (len(mts) - 1) / dt if dt > 0 else 0
+        else:
+            mask_fps = 0
+
+        cv2.putText(panel, f"WS: {ws_fps:.0f} fps", (12, y), font, 0.35, self._TEXT_COLOR, 1, cv2.LINE_AA)
+        y += 16
+        cv2.putText(panel, f"Mask: {mask_fps:.1f} fps", (12, y), font, 0.35, self._TEXT_COLOR, 1, cv2.LINE_AA)
+        y += 16
+        cv2.putText(panel, f"Segs: {n_segs}", (12, y), font, 0.35, self._TEXT_COLOR, 1, cv2.LINE_AA)
+        y += 20
+
+        # Recent commands log
+        if self._input_log:
+            cv2.putText(panel, "LOG", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+            y += 5
+            cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+            y += 18
+            for entry in self._input_log[-5:]:
+                cv2.putText(panel, entry, (12, y), font, 0.3, (140, 140, 140), 1, cv2.LINE_AA)
+                y += 14
+
+        # --- Bottom input bar (full width) ---
+        bar = canvas[fh:fh + ibh, 0:canvas_w]
+        bar[:] = self._INPUT_BG
+        cv2.line(canvas, (0, fh), (canvas_w, fh), (60, 60, 60), 1)
+
+        # Blinking cursor
+        cursor = "|" if int(time.time() * 2) % 2 == 0 else ""
+        input_display = f"> {self._input_text}{cursor}"
+        cv2.putText(bar, input_display, (10, 27), font, 0.5, self._CURSOR_COLOR, 1, cv2.LINE_AA)
+
+        # Hint on right side of input bar
+        hint = "Type command + Enter  |  ESC clear"
+        (hw, _), _ = cv2.getTextSize(hint, font, 0.3, 1)
+        cv2.putText(bar, hint, (canvas_w - hw - 10, 27), font, 0.3, (80, 80, 80), 1, cv2.LINE_AA)
+
+        cv2.imshow("SocialSenseAR Server", canvas)
+
+        # --- Drain all queued keyboard input (also processes window messages + close check) ---
+        self._poll_keys()
+
+        # Auto-save screenshot every 5 seconds
         now = time.time()
         if now - self._last_screenshot_time >= 5.0:
             self._last_screenshot_time = now
             import os
             ss_path = os.path.expanduser("~/Downloads/debug_view.png")
-            cv2.imwrite(ss_path, frame)
-            logger.info(f"Debug screenshot saved: {ss_path}")
+            cv2.imwrite(ss_path, canvas)
+
+    def _poll_keys(self):
+        """Drain all queued keyboard events and check for window close.
+
+        Called on every frame (not just renders) so typing feels responsive
+        and window X button is detected immediately.
+        """
+        import cv2
+        for _ in range(20):  # cap to avoid infinite loop edge cases
+            key = cv2.waitKey(1) & 0xFF
+            if key == 255 or key == 0:
+                break
+            self._process_input_key(key)
+
+        # Check if window was closed (X button)
+        try:
+            if cv2.getWindowProperty("SocialSenseAR Server", cv2.WND_PROP_VISIBLE) < 1:
+                cv2.destroyAllWindows()
+                import os
+                os._exit(0)
+        except cv2.error:
+            import os
+            os._exit(0)
+
+    def _process_input_key(self, key: int):
+        """Handle a single keypress from the dashboard cv2 window."""
+        if key == 27:  # ESC — clear input
+            self._input_text = ""
+        elif key == 13:  # Enter — submit command
+            if self._input_text.strip():
+                self._execute_command(self._input_text.strip())
+            self._input_text = ""
+        elif key == 8 or key == 127:  # Backspace
+            self._input_text = self._input_text[:-1]
+        elif 32 <= key <= 126:  # printable ASCII
+            self._input_text += chr(key)
+
+    def _execute_command(self, raw_cmd: str):
+        """Execute a typed command against the pipeline."""
+        from server.commands import parse_command
+
+        if self.pipeline is None:
+            return
+
+        action, target = parse_command(raw_cmd)
+
+        if action == "blur" and target:
+            self.pipeline.add_prompt(target)
+            self._input_log.append(f"+ {target}")
+        elif action == "unblur" and target:
+            self.pipeline.remove_prompt(target)
+            self._input_log.append(f"- {target}")
+        elif action == "clear":
+            self.pipeline.set_active_prompts(set())
+            self._input_log.append("cleared all")
+        elif action == "list":
+            active = self.pipeline.get_active_prompts()
+            self._input_log.append(f"active: {', '.join(sorted(active)) or 'none'}")
+        elif action == "help":
+            from server.commands import KNOWN_LABELS
+            self._input_log.append(f"labels: {', '.join(sorted(KNOWN_LABELS))}")
+        else:
+            self._input_log.append(f"? {raw_cmd}")
+
+        # Keep log bounded
+        if len(self._input_log) > 10:
+            self._input_log = self._input_log[-10:]
+
+    # ------------------------------------------------------------------
+    # Non-dashboard helpers
+    # ------------------------------------------------------------------
 
     def _empty_response(self, frame_id: int) -> bytes:
         response = pb.ServerMessage()
@@ -276,8 +497,61 @@ class SocialSenseServer:
             )
 
     def _handle_control(self, msg: pb.ClientMessage):
-        """Handle control commands from the client."""
-        cmd = msg.control.command
-        logger.info(f"Control command: {cmd}")
-        if cmd == "reset" and self.pipeline is not None:
+        """Handle control commands from the client.
+
+        Supports prompt control: blur/unblur <label>, clear, list, reset.
+        """
+        from server.commands import parse_command
+
+        raw = msg.control.command
+        logger.info(f"Control command: {raw}")
+
+        if self.pipeline is None:
+            return
+
+        # "reset" is a pipeline reset (not prompt clear) — check before parse_command
+        # since parse_command maps "reset" to ("clear", None)
+        if raw.strip().lower() == "reset":
             self.pipeline.reset()
+            return
+
+        action, target = parse_command(raw)
+
+        if action == "blur" and target:
+            self.pipeline.add_prompt(target)
+        elif action == "unblur" and target:
+            self.pipeline.remove_prompt(target)
+        elif action == "clear":
+            self.pipeline.set_active_prompts(set())
+        elif action == "list":
+            active = self.pipeline.get_active_prompts()
+            logger.info(f"Active prompts: {sorted(active)}")
+
+    async def _console_command_loop(self):
+        """Read commands from server console — fallback when cv2 window not focused."""
+        from server.commands import parse_command, CommandInput, KNOWN_LABELS, LABEL_ALIASES
+
+        cmd_input = CommandInput()
+        cmd_input.start()
+
+        try:
+            while True:
+                await asyncio.sleep(0.2)
+                for raw_cmd in cmd_input.get_commands():
+                    action, target = parse_command(raw_cmd)
+                    if action == "blur" and target:
+                        self.pipeline.add_prompt(target)
+                    elif action == "unblur" and target:
+                        self.pipeline.remove_prompt(target)
+                    elif action == "clear":
+                        self.pipeline.set_active_prompts(set())
+                        logger.info("Cleared all active prompts")
+                    elif action == "list":
+                        active = self.pipeline.get_active_prompts()
+                        logger.info(f"Active prompts: {sorted(active)}")
+                    elif action == "help":
+                        logger.info(f"Labels: {', '.join(sorted(KNOWN_LABELS))}")
+                        logger.info(f"Aliases: {', '.join(f'{k}->{v}' for k, v in sorted(LABEL_ALIASES.items()))}")
+                        logger.info("Commands: blur <obj>, unblur <obj>, clear, list, help")
+        except asyncio.CancelledError:
+            cmd_input.stop()

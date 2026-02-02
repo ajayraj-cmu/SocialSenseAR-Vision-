@@ -82,6 +82,8 @@ class PipelineOrchestrator:
         self._sam_thread: threading.Thread | None = None
         self._sam_stop = threading.Event()
         self._sam_count = 0
+        self._sam_total_ms_accum = 0.0
+        self._sam_ms_accum = 0.0
 
         # --- Gemini labeling (background, every 2s) ---
         self._gemini_interval = 2.0
@@ -161,6 +163,42 @@ class PipelineOrchestrator:
             self._metrics_log = None
         self._initialized = False
         logger.info("Pipeline shut down")
+
+    # ------------------------------------------------------------------
+    # Dynamic prompt control
+    # ------------------------------------------------------------------
+
+    def set_active_prompts(self, prompts: set[str]):
+        """Replace active prompts. Clears tracks for removed labels."""
+        old = self._segmenter.get_active_prompts()
+        self._segmenter.set_active_prompts(prompts)
+        removed = old - prompts
+        if removed:
+            self._clear_tracks_for_labels(removed)
+
+    def add_prompt(self, prompt: str):
+        """Add a single prompt to the active set."""
+        self._segmenter.add_prompt(prompt)
+
+    def remove_prompt(self, prompt: str):
+        """Remove a single prompt. Clears matching tracks."""
+        self._segmenter.remove_prompt(prompt)
+        self._clear_tracks_for_labels({prompt})
+
+    def get_active_prompts(self) -> set[str]:
+        """Return current active prompts."""
+        return self._segmenter.get_active_prompts()
+
+    def _clear_tracks_for_labels(self, labels: set[str]):
+        """Remove tracks whose label matches any in the given set."""
+        to_remove = [tid for tid, track in self._tracks.items()
+                     if track.get("label") in labels]
+        for tid in to_remove:
+            del self._tracks[tid]
+        if to_remove:
+            # Clear cached result so next frame builds fresh segments
+            self._cached_result = None
+            logger.info(f"Cleared {len(to_remove)} tracks for removed prompts: {labels}")
 
     # ------------------------------------------------------------------
     # Frame processing — pre-decodes JPEG, returns cached result
@@ -356,16 +394,18 @@ class PipelineOrchestrator:
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
-                tracked_label = "Vcache" if decoder_skipped else "Vfresh"
-                if self._sam_count % 10 == 0 or self._sam_count <= 3:
-                    logger.info(
-                        f"SAM #{self._sam_count}: {total_ms:.0f}ms total "
-                        f"({sam_ms:.0f}ms SAM)[{tracked_label}], {len(tracked)} segs"
-                    )
-                # Track stability log — shows track IDs and labels every 50 cycles
-                if self._sam_count % 50 == 0:
+                self._sam_total_ms_accum += total_ms
+                self._sam_ms_accum += sam_ms
+                if self._sam_count % 120 == 0 and self._sam_count > 0:
+                    avg_total = self._sam_total_ms_accum / 120
+                    avg_sam = self._sam_ms_accum / 120
+                    self._sam_total_ms_accum = 0.0
+                    self._sam_ms_accum = 0.0
                     track_info = [(t.track_id, t.label) for t in tracked]
-                    logger.info(f"TRACKS: {track_info}")
+                    logger.info(
+                        f"SAM #{self._sam_count}: avg {avg_total:.0f}ms total "
+                        f"({avg_sam:.0f}ms SAM), {len(tracked)} segs | {track_info}"
+                    )
 
                 # Write structured metrics
                 if self._metrics_log:
