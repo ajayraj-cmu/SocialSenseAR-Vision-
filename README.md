@@ -66,7 +66,7 @@ python -m server.main --device cuda
 ### 5. Test without a headset
 
 ```bash
-python -m server.test_client --show
+python -m server.test_client
 ```
 
 ## Server Flags

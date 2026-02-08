@@ -27,6 +27,7 @@ Same interface as FastSAMSegmenter:
 import os
 import time
 import logging
+import threading
 import cv2
 import numpy as np
 
@@ -93,8 +94,13 @@ class SAM3Segmenter:
         self._prompts_per_frame = config.sam3_prompts_per_frame
         self._confidence_threshold = config.sam3_confidence_threshold
 
-        # Mask cache: prompt -> (mask_u8, timestamp) for non-queried prompts
+        # Dynamic prompt control — starts empty (no segmentation until commands arrive)
+        self._active_prompts: list[str] = []
+        self._prompts_lock = threading.Lock()
+
+        # Mask cache: prompt -> (mask_u8, timestamp, frame_gen) for non-queried prompts
         self._mask_cache: dict[str, tuple[np.ndarray, float]] = {}
+        self._score_cache: dict[str, float] = {}  # prompt -> decoder confidence score
         self._cache_ttl = config.sam3_cache_ttl
 
         self._frame_count = 0
@@ -110,6 +116,7 @@ class SAM3Segmenter:
 
         # Native TRT decoder backend (built .engine file)
         self._use_trt_decoder = False  # hybrid: PyTorch vision + TRT decoder
+        self._pytorch_decoder_freed = False  # True after deleting detr_encoder etc for VRAM
         self._trt_topk = False         # True if using top-k engine (best_mask+best_score outputs)
         self._trt_context = None       # TRT execution context
         self._trt_engine = None        # TRT engine
@@ -165,6 +172,113 @@ class SAM3Segmenter:
 
         # Pre-computed FP32 text embeddings for TRT decoder
         self._text_embeds_fp32 = {}  # prompt -> (text_embeds_fp32, attn_mask_i64)
+
+    # ------------------------------------------------------------------
+    # Dynamic prompt control
+    # ------------------------------------------------------------------
+
+    def set_active_prompts(self, prompts: set[str]):
+        """Replace active prompts. Thread-safe. Clears cache for removed prompts."""
+        # Prepare embeddings for any new prompts
+        for p in prompts:
+            if p not in self._text_embeds:
+                self._prepare_prompt(p)
+        valid = list(prompts)
+        with self._prompts_lock:
+            old = set(self._active_prompts)
+            self._active_prompts = valid
+            self._rotate_index = 0
+            # Clear mask cache for removed prompts
+            removed = old - set(valid)
+            for p in removed:
+                self._mask_cache.pop(p, None)
+                self._score_cache.pop(p, None)
+        logger.info(f"Active prompts set to: {valid}")
+
+    def get_active_prompts(self) -> set[str]:
+        """Return current active prompts. Thread-safe."""
+        with self._prompts_lock:
+            return set(self._active_prompts)
+
+    def add_prompt(self, prompt: str):
+        """Add a single prompt. Thread-safe. Accepts arbitrary text — SAM3 is text-prompted."""
+        # Prepare embeddings on-the-fly if this is a new prompt
+        if prompt not in self._text_embeds:
+            self._prepare_prompt(prompt)
+        with self._prompts_lock:
+            if prompt not in self._active_prompts:
+                self._active_prompts.append(prompt)
+                logger.info(f"Prompt added: '{prompt}' | active: {self._active_prompts}")
+
+    def remove_prompt(self, prompt: str):
+        """Remove a single prompt. Thread-safe. Clears its cache."""
+        with self._prompts_lock:
+            if prompt in self._active_prompts:
+                self._active_prompts.remove(prompt)
+                self._mask_cache.pop(prompt, None)
+                self._score_cache.pop(prompt, None)
+                logger.info(f"Prompt removed: '{prompt}' | active: {self._active_prompts}")
+
+    def _prepare_prompt(self, prompt: str):
+        """Tokenize + compute text embeddings for an arbitrary prompt on-the-fly.
+
+        Called when user adds a prompt not in the pre-computed ALL_PROMPTS list.
+        Requires the text encoder to still be loaded (not freed).
+        """
+        if prompt in self._text_embeds:
+            return  # already prepared
+
+        if not hasattr(self._model, 'text_encoder'):
+            logger.warning(f"Cannot prepare prompt '{prompt}': text encoder was freed")
+            return
+
+        torch = self._torch
+        from PIL import Image
+
+        t0 = time.perf_counter()
+
+        # 1. Tokenize
+        dummy_img = Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+        inputs = self._processor(images=dummy_img, text=prompt, return_tensors="pt")
+        ids = inputs["input_ids"].to(self._device)
+        attn = inputs["attention_mask"].to(self._device)
+
+        # Pad to match pre-tokenized max length
+        pad_len = self._max_token_len - ids.shape[1]
+        if pad_len > 0:
+            ids = torch.nn.functional.pad(ids, (0, pad_len), value=0)
+            attn = torch.nn.functional.pad(attn, (0, pad_len), value=0)
+        elif pad_len < 0:
+            # Truncate if longer than pre-computed max (unlikely for short labels)
+            ids = ids[:, :self._max_token_len]
+            attn = attn[:, :self._max_token_len]
+
+        self._tokenized[prompt] = {
+            "input_ids": ids,
+            "attention_mask": attn,
+        }
+
+        # 2. Compute text embeddings
+        with torch.no_grad():
+            text_out = self._model.get_text_features(
+                input_ids=ids,
+                attention_mask=attn,
+                return_dict=True,
+            )
+            self._text_embeds[prompt] = {
+                "text_embeds": text_out.pooler_output.detach(),
+                "attention_mask": attn,
+            }
+
+        # 3. FP32 version for TRT decoder
+        te = self._text_embeds[prompt]
+        self._text_embeds_fp32[prompt] = (
+            te["text_embeds"].float().contiguous(),
+            te["attention_mask"].long().contiguous(),
+        )
+
+        ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"Prepared new prompt '{prompt}' ({ms:.0f}ms)")
 
     # ------------------------------------------------------------------
     # Initialization
@@ -261,16 +375,15 @@ class SAM3Segmenter:
 
         # --- Free unused PyTorch components to reclaim VRAM ---
         freed = []
-        # Text encoder: only needed during init for _precompute_text_embeds()
-        if self._text_embeds_ready and hasattr(self._model, 'text_encoder'):
-            del self._model.text_encoder
-            freed.append("text_encoder")
+        # Text encoder: KEPT alive for on-the-fly embedding of dynamic prompts
+        # (user can type arbitrary objects like "bottle", "painting", etc.)
         # Decoder components: only needed if PyTorch decoder fallback is active
         if self._use_trt_decoder:
             for name in ["detr_encoder", "detr_decoder", "mask_decoder"]:
                 if hasattr(self._model, name):
                     delattr(self._model, name)
                     freed.append(name)
+            self._pytorch_decoder_freed = True
         if freed:
             self._torch.cuda.empty_cache()
             logger.info(f"    Freed PyTorch components: {', '.join(freed)}")
@@ -883,7 +996,7 @@ class SAM3Segmenter:
             self._last_thumb = thumb
             return True
         diff = np.mean(np.abs(thumb.astype(np.int16) - self._last_thumb.astype(np.int16)))
-        changed = diff > 12.0  # webcam noise ~5-11, deliberate motion 12+
+        changed = diff > 5.0  # lower threshold — catch subtle head turns, not just large motion
         if self._frame_count <= 30 or self._frame_count % 20 == 0:
             _dbg(f"  frame_diff={diff:.1f} changed={changed}")
         if changed:
@@ -972,10 +1085,8 @@ class SAM3Segmenter:
             raise
 
     def _segment_frame_inner(self, frame_bgr, torch, t0, h, w, now):
-        # --- Step 1: Check frame similarity (Phase 4 — vision skip) ---
-        frame_changed = self._frame_changed(frame_bgr)
-        force_refresh = (self._frame_count % 60 == 0)
-        need_vision = frame_changed or self._cached_vision_embeds is None or force_refresh
+        # --- Step 1: Always run vision (skip logic disabled for responsiveness) ---
+        need_vision = True
 
         # --- Step 2: Collect previous async vision result (if any) ---
         if self._pipeline_state == "VISION_RUNNING":
@@ -1018,13 +1129,22 @@ class SAM3Segmenter:
             self._vision_skip_count += 1
         vis_ms = (time.perf_counter() - t_vis) * 1000
 
-        # --- Step 5: Select prompts ---
-        n = min(self._prompts_per_frame, len(ALL_PROMPTS))
+        # --- Step 5: Select prompts (from dynamic active set) ---
+        with self._prompts_lock:
+            active = list(self._active_prompts)
+
+        if not active:
+            # No active prompts — skip decoder, return empty
+            self._decoder_skipped = True
+            self._vision_ran = need_vision
+            return []
+
+        n = min(self._prompts_per_frame, len(active))
         prompts_this_frame = []
         for i in range(n):
-            idx = (self._rotate_index + i) % len(ALL_PROMPTS)
-            prompts_this_frame.append(ALL_PROMPTS[idx])
-        self._rotate_index = (self._rotate_index + n) % len(ALL_PROMPTS)
+            idx = (self._rotate_index + i) % len(active)
+            prompts_this_frame.append(active[idx])
+        self._rotate_index = (self._rotate_index + n) % len(active)
 
         # --- Step 6: Decode prompts ---
         # When vision features change (new frame content), re-decode ALL prompts
@@ -1034,11 +1154,12 @@ class SAM3Segmenter:
         t_dec = time.perf_counter()
         if need_vision:
             prompts_to_decode = list(prompts_this_frame)
-            if "person" not in prompts_to_decode:
+            # Only force "person" if it's in active prompts
+            if "person" in active and "person" not in prompts_to_decode:
                 prompts_to_decode.insert(0, "person")
-            # Re-decode all prompts with visible cached masks for consistency
+            # Re-decode all active prompts with visible cached masks for consistency
             for p in list(self._mask_cache.keys()):
-                if p in prompts_to_decode:
+                if p not in active or p in prompts_to_decode:
                     continue
                 mask_u8, ts, _gen = self._mask_cache[p]
                 if mask_u8 is not None and now - ts <= self._cache_ttl:
@@ -1072,13 +1193,8 @@ class SAM3Segmenter:
         total_ms = (time.perf_counter() - t0) * 1000
         vis_tag = "SKIP" if not need_vision else f"{vis_ms:.0f}"
         dec_tag = "SKIP" if self._decoder_skipped else f"{dec_ms:.0f}"
-        if self._frame_count <= 20 or self._frame_count % 10 == 0:
+        if self._frame_count <= 3 or self._frame_count % 120 == 0:
             n_decoded = len(new_masks)
-            _dbg(f"SAM3 #{self._frame_count}: {total_ms:.0f}ms "
-                 f"(pre={pre_ms:.0f} vis={vis_tag} dec={dec_tag}) "
-                 f"{n_decoded}p {len(segments)}s "
-                 f"vskip={self._vision_skip_count}")
-        if self._frame_count % 30 == 0 or self._frame_count <= 3:
             backend = "TRT-pipe" if (self._use_trt_vision and self._use_trt_decoder) else \
                       "TRT-dec" if self._use_trt_decoder else \
                       ("TRT" if self._use_trt else ("batched" if self._batch_supported else "seq"))
@@ -1098,6 +1214,12 @@ class SAM3Segmenter:
         """Run decoder for all prompts. Tries TRT, then batched PyTorch, then sequential."""
         if self._use_trt_decoder:
             return self._run_decoder_trt_native(vision_embeds, prompts, h, w)
+
+        # PyTorch decoder components were deleted to free VRAM — can't fall back
+        if self._pytorch_decoder_freed:
+            if self._frame_count % 120 == 1:
+                logger.warning("TRT decoder disabled and PyTorch decoder freed — returning empty")
+            return {p: None for p in prompts}
 
         if self._use_trt:
             return self._run_decoder_trt(vision_embeds, prompts, h, w)
@@ -1184,7 +1306,14 @@ class SAM3Segmenter:
             self._trt_stream.synchronize()  # Must sync before reading score / changing addresses
 
             if not ok:
-                logger.warning(f"TRT decoder failed for '{p}', falling back to PyTorch")
+                logger.warning(f"TRT decoder failed for '{p}', rebuilding context")
+                try:
+                    self._trt_context = self._trt_engine.create_execution_context()
+                except Exception:
+                    pass
+                if self._pytorch_decoder_freed:
+                    # PyTorch decoder was deleted — return empty, TRT will retry next frame
+                    return {p: None for p in prompts}
                 self._use_trt_decoder = False
                 if self._batch_supported:
                     return self._run_decoder_batched(vision_embeds, prompts, h, w)
@@ -1199,8 +1328,11 @@ class SAM3Segmenter:
                 try:
                     self._trt_context = self._trt_engine.create_execution_context()
                 except Exception:
-                    self._use_trt_decoder = False
+                    pass
                 self._cached_fpn_fp32 = None
+                if self._pytorch_decoder_freed:
+                    return {p: None for p in prompts}
+                self._use_trt_decoder = False
                 if self._batch_supported:
                     return self._run_decoder_batched(vision_embeds, prompts, h, w)
                 return self._run_decoder_sequential(vision_embeds, prompts, h, w)
@@ -1210,6 +1342,10 @@ class SAM3Segmenter:
         _dbg(f"TRT-topk F#{self._frame_count} scores: [{score_info}] calls={self._trt_call_count}")
 
         # --- Batch post-process: threshold + resize + CPU transfer ---
+        # Store scores for dashboard display
+        for i, p in enumerate(prompts):
+            self._score_cache[p] = all_scores[i]
+
         result = {}
         passing = []  # (buffer_index, prompt_name)
         for i, p in enumerate(prompts):
@@ -1272,7 +1408,13 @@ class SAM3Segmenter:
             self._trt_stream.synchronize()
 
             if not ok:
-                logger.warning("TRT decoder execution failed, falling back to PyTorch")
+                logger.warning("TRT decoder execution failed, rebuilding context")
+                try:
+                    self._trt_context = self._trt_engine.create_execution_context()
+                except Exception:
+                    pass
+                if self._pytorch_decoder_freed:
+                    return {p: None for p in prompts}
                 self._use_trt_decoder = False
                 return self._run_decoder_batched(vision_embeds, prompts, h, w)
 
@@ -1531,6 +1673,7 @@ class SAM3Segmenter:
 
         result = {}
         for i, prompt in enumerate(prompts):
+            self._score_cache[prompt] = best_score[i].item()
             if best_score[i].item() < self._confidence_threshold:
                 result[prompt] = None
                 continue
@@ -1588,22 +1731,26 @@ class SAM3Segmenter:
         return mask_u8
 
     def _build_segments(self, h: int, w: int, now: float) -> list[SegmentData]:
-        """Build output segments from mask cache (same logic as before)."""
+        """Build output segments from mask cache — only for active prompts."""
         segments: list[SegmentData] = []
         person_mask = None
+
+        with self._prompts_lock:
+            active = set(self._active_prompts)
 
         # Debug: log cache state on first frames and periodically
         if self._frame_count <= 20 or self._frame_count % 100 == 0:
             cache_info = {p: (m is not None, f"age={now-ts:.1f}s", f"gen={g}")
                          for p, (m, ts, g) in self._mask_cache.items()}
-            _dbg(f"_build_segments F#{self._frame_count}: cache={cache_info}")
+            _dbg(f"_build_segments F#{self._frame_count}: active={active} cache={cache_info}")
 
-        # Person first (priority)
-        if "person" in self._mask_cache:
+        # Person first (priority) — only if active
+        if "person" in active and "person" in self._mask_cache:
             pmask, pts, _gen = self._mask_cache["person"]
             if pmask is not None and now - pts <= self._cache_ttl:
                 person_mask = pmask
-                seg = self._mask_to_segment(pmask, "person", h, w)
+                score = self._score_cache.get("person", 0.0)
+                seg = self._mask_to_segment(pmask, "person", h, w, confidence=score)
                 if seg is not None:
                     segments.append(seg)
 
@@ -1614,10 +1761,12 @@ class SAM3Segmenter:
         if person_mask is not None:
             used_pixels |= (person_mask > 127)
 
-        # Other categories from cache
+        # Other categories from cache — only active prompts
         expired = []
         for prompt, (mask_u8, ts, _gen) in self._mask_cache.items():
             if prompt == "person":
+                continue
+            if prompt not in active:
                 continue
             if now - ts > self._cache_ttl:
                 expired.append(prompt)
@@ -1631,7 +1780,8 @@ class SAM3Segmenter:
             if area < self.config.mask_min_area:
                 continue
 
-            seg = self._mask_to_segment(clean, prompt, h, w)
+            score = self._score_cache.get(prompt, 0.0)
+            seg = self._mask_to_segment(clean, prompt, h, w, confidence=score)
             if seg is not None:
                 segments.append(seg)
                 used_pixels |= (clean > 127)
@@ -1646,7 +1796,8 @@ class SAM3Segmenter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _mask_to_segment(mask_u8: np.ndarray, label: str, h: int, w: int) -> SegmentData | None:
+    def _mask_to_segment(mask_u8: np.ndarray, label: str, h: int, w: int,
+                         confidence: float = 0.0) -> SegmentData | None:
         """Convert a uint8 mask to SegmentData."""
         area = cv2.countNonZero(mask_u8)
         if area < 200:
@@ -1660,7 +1811,7 @@ class SAM3Segmenter:
         cy = M["m01"] / M["m00"]
         x, y, bw, bh = cv2.boundingRect(mask_u8)
 
-        seg = SegmentData(mask=mask_u8, label=label, confidence=0.8)
+        seg = SegmentData(mask=mask_u8, label=label, confidence=confidence)
         seg.center_x = cx / w
         seg.center_y = cy / h
         seg.mask_width = w
@@ -1690,6 +1841,7 @@ class SAM3Segmenter:
         self._compiled_forward = None
         self._tokenized.clear()
         self._mask_cache.clear()
+        self._score_cache.clear()
         self._trt_context = None
         self._trt_engine = None
         self._trt_vis_context = None

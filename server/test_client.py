@@ -4,8 +4,9 @@ Architecture:
   FrameGrabber thread  -> always has the latest webcam frame ready
   sender loop          -> encodes JPEG + sends protobuf (fire-and-forget)
   receiver() task      -> collects server responses, tracks round-trip latency
-  display (optional)   -> cv2 overlay with latest response
   CommandInput thread  -> reads console commands (blur face, etc.)
+
+All display is handled by the server dashboard window.
 
 Commands (type in console or speak via Whisper):
     blur <object>       — blur person, face, wall, etc.
@@ -17,8 +18,8 @@ Commands (type in console or speak via Whisper):
 
 Usage:
     python -m server.main --device cuda
-    python -m server.test_client --show
-    python -m server.test_client --show --whisper   # enable voice commands
+    python -m server.test_client
+    python -m server.test_client --whisper   # enable voice commands
 """
 
 import asyncio
@@ -40,112 +41,8 @@ import websockets
 
 sys.path.insert(0, ".")
 from server.proto import socialsense_pb2 as pb
-from server.encoding.rle import decode_rle
+from server.commands import parse_command, KNOWN_LABELS, LABEL_ALIASES, CommandInput
 
-# Known object labels that SAM3 can detect
-KNOWN_LABELS = {
-    "person", "face", "chair", "table", "desk", "couch", "monitor",
-    "laptop", "lamp", "wall", "floor", "door", "window",
-    "head", "hair", "torso", "body", "shirt", "arm", "hand",
-    "shoulder", "skin", "pants", "leg", "human",
-}
-
-# Aliases: map common words to SAM3 labels
-LABEL_ALIASES = {
-    "computer": "monitor", "screen": "monitor", "display": "monitor",
-    "sofa": "couch", "settee": "couch",
-    "light": "lamp", "ceiling light": "lamp",
-    "ground": "floor", "carpet": "floor",
-    "background": "wall",  # blur wall = blur background
-    "people": "person", "human": "person", "man": "person", "woman": "person",
-    "hands": "hand", "arms": "arm", "legs": "leg",
-    "furniture": "chair",  # best effort
-}
-
-
-def parse_command(text: str) -> tuple[str, str | None]:
-    """Parse a command string into (action, target).
-
-    Supports:
-        "blur face"      -> ("blur", "face")
-        "face blur"      -> ("blur", "face")
-        "unblur person"  -> ("unblur", "person")
-        "person unblur"  -> ("unblur", "person")
-        "clear"          -> ("clear", None)
-        "list"           -> ("list", None)
-        "help"           -> ("help", None)
-    """
-    text = text.strip().lower()
-    if not text:
-        return ("", None)
-
-    # Single-word commands
-    if text in ("clear", "reset", "clearall"):
-        return ("clear", None)
-    if text in ("list", "ls", "show", "status"):
-        return ("list", None)
-    if text in ("help", "?", "commands"):
-        return ("help", None)
-
-    words = text.split()
-
-    # Two-word: "blur face" or "face blur"
-    action = None
-    target = None
-    for w in words:
-        if w in ("blur", "blr", "blue"):  # handle typos
-            action = "blur"
-        elif w in ("unblur", "unblr", "remove", "stop", "off"):
-            action = "unblur"
-        else:
-            target = w
-
-    if action is None:
-        # Default: "blur" if just a label name
-        action = "blur"
-        target = text.split()[0]
-
-    if target:
-        # Resolve aliases
-        target = LABEL_ALIASES.get(target, target)
-
-    return (action, target)
-
-
-class CommandInput:
-    """Background thread that reads console commands (stdin)."""
-
-    def __init__(self):
-        self._queue: queue.Queue[str] = queue.Queue()
-        self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        self._thread.start()
-
-    def _run(self):
-        while self._running:
-            try:
-                line = input()
-                if line.strip():
-                    self._queue.put(line.strip())
-            except EOFError:
-                break
-            except Exception:
-                break
-
-    def get_commands(self) -> list[str]:
-        """Non-blocking: return all queued commands."""
-        cmds = []
-        while not self._queue.empty():
-            try:
-                cmds.append(self._queue.get_nowait())
-            except queue.Empty:
-                break
-        return cmds
-
-    def stop(self):
-        self._running = False
 
 
 class WhisperInput:
@@ -293,176 +190,6 @@ class FrameGrabber:
         self._cap.release()
 
 
-# Matches bright_colors from sam_gemini_voice.py
-BRIGHT_COLORS = [
-    (0, 255, 255),      # Cyan
-    (255, 0, 255),      # Magenta
-    (0, 255, 0),        # Bright Green
-    (255, 255, 0),      # Yellow
-    (255, 128, 0),      # Orange
-    (128, 0, 255),      # Purple
-    (0, 128, 255),      # Light Blue
-    (255, 0, 128),      # Pink
-    (0, 200, 100),      # Emerald
-    (100, 255, 200),    # Mint
-]
-
-
-def _rects_overlap(rect, placed):
-    """Check if rect overlaps any already-placed label rectangle."""
-    x1, y1, x2, y2 = rect
-    for px1, py1, px2, py2 in placed:
-        if x1 < px2 and x2 > px1 and y1 < py2 and y2 > py1:
-            return True
-    return False
-
-
-def apply_blur_effects(frame, resp, blur_targets: set[str]):
-    """Apply Gaussian blur to segments matching blur_targets.
-
-    For each segment whose label matches a blur target, blur the masked region.
-    Returns the modified frame.
-    """
-    if not blur_targets or not resp or not resp.segments:
-        return frame
-
-    h, w = frame.shape[:2]
-    # Pre-compute a single heavy blur of the entire frame
-    blurred = cv2.GaussianBlur(frame, (51, 51), 30)
-
-    for seg in resp.segments:
-        if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
-            continue
-
-        label = (seg.label or "").lower().lstrip("~")
-        asset_class = (seg.asset_class or "").lower()
-
-        # Check if this segment matches any blur target
-        matched = False
-        for target in blur_targets:
-            if target == label:
-                matched = True
-                break
-            if target == asset_class:
-                matched = True
-                break
-            # Partial match: "person" matches "left_hand" via asset_class
-            if target in label or label in target:
-                matched = True
-                break
-        if not matched:
-            continue
-
-        # Decode mask and apply blur
-        mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
-        if mask.shape[:2] != (h, w):
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        mask_bool = mask > 128 if mask.dtype == np.uint8 else mask > 0.5
-
-        # Composite: blurred where mask, original elsewhere
-        frame[mask_bool] = blurred[mask_bool]
-
-    return frame
-
-
-def draw_overlay_fast(frame, resp, debug_mode: bool):
-    """Draw segment overlays with contour outlines + labels.
-
-    Labels are nudged upward to avoid overlapping each other.
-    debug_mode=False (default): contour outlines + center labels.
-    debug_mode=True  (press P): adds bounding boxes + detailed label info.
-    """
-    h, w = frame.shape[:2]
-    placed_rects = []  # Track placed label positions to avoid overlap
-
-    for i, seg in enumerate(resp.segments):
-        if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
-            continue
-
-        # Decode RLE mask
-        mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
-        if mask.shape[:2] != (h, w):
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-
-        mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
-
-        # Find contours (masks are already smoothed during RLE encoding)
-        contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            continue
-
-        label = seg.label or ""
-        is_pending = label.startswith("~")
-        display_label = label.lstrip("~") if is_pending else label
-
-        # Stable color from track_id (consistent across frames)
-        color_idx = hash(seg.track_id) if seg.track_id else i
-        border_color = BRIGHT_COLORS[color_idx % len(BRIGHT_COLORS)]
-
-        # Draw contour outlines with black border for contrast
-        cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)
-        cv2.drawContours(frame, contours, -1, border_color, 2)
-
-        # Draw label at segment center with collision avoidance
-        if display_label:
-            cx = int(seg.center_x * w)
-            cy = int(seg.center_y * h)
-
-            if is_pending:
-                font_scale, thickness = 0.35, 1
-                text_color = (150, 150, 150)
-                bg_color = (50, 50, 50)
-                pad = 2
-            else:
-                font_scale, thickness = 0.5, 1
-                text_color = border_color
-                bg_color = (0, 0, 0)
-                pad = 3
-
-            (tw, th), _ = cv2.getTextSize(display_label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-
-            # Nudge label upward if it overlaps an existing label
-            cy_draw = cy
-            for _ in range(5):
-                label_rect = (cx - pad, cy_draw - th - pad, cx + tw + pad, cy_draw + pad)
-                if not _rects_overlap(label_rect, placed_rects):
-                    break
-                cy_draw -= (th + pad * 2 + 2)
-            else:
-                label_rect = (cx - pad, cy_draw - th - pad, cx + tw + pad, cy_draw + pad)
-
-            placed_rects.append(label_rect)
-            cv2.rectangle(frame, (label_rect[0], label_rect[1]),
-                         (label_rect[2], label_rect[3]), bg_color, -1)
-            cv2.putText(frame, display_label, (cx, cy_draw),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
-
-        # Debug mode: bounding boxes + detailed info
-        if debug_mode:
-            x1, y1 = int(seg.bbox.x_min * w), int(seg.bbox.y_min * h)
-            x2, y2 = int(seg.bbox.x_max * w), int(seg.bbox.y_max * h)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 1)
-
-            detail = f"{seg.label} [{seg.asset_class}] {seg.confidence:.0%}"
-            if seg.emotion.primary_emotion:
-                detail += f" {seg.emotion.display_label}"
-            (tw, th_), _ = cv2.getTextSize(detail, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-            cv2.rectangle(frame, (x1, y1 - th_ - 6), (x1 + tw + 4, y1), (30, 30, 30), -1)
-            cv2.putText(frame, detail, (x1 + 2, y1 - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
-
-    # Conversation
-    conv = resp.conversation
-    if conv.summary:
-        cv2.putText(frame, f"Conv: {conv.summary}", (10, h - 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-    if conv.vibe:
-        cv2.putText(frame, f"Vibe: {conv.vibe}", (10, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 255), 1, cv2.LINE_AA)
-
-    return frame
-
-
 def _mask_fingerprint(resp) -> str:
     """Content fingerprint of segment positions + masks. Ignores frame_id/timestamp."""
     if not resp or not resp.segments:
@@ -476,7 +203,7 @@ def _mask_fingerprint(resp) -> str:
     return "|".join(parts)
 
 
-async def run_client(url: str, target_fps: int, show: bool, camera: int,
+async def run_client(url: str, target_fps: int, camera: int,
                      whisper_enabled: bool = False):
     # Check protobuf backend
     try:
@@ -518,9 +245,8 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int,
             ping_interval=20,
             ping_timeout=60,
         ) as ws:
-            print(f"Connected! Target {target_fps} fps. Ctrl+C or Q to quit.")
-            if show:
-                print("  P = toggle debug mode (bounding boxes + detailed labels)")
+            print(f"Connected! Target {target_fps} fps. Ctrl+C to quit.")
+            print("  Display is on the SERVER window.")
             print("Commands (type in console):")
             print("  blur <object>  — blur person, face, wall, monitor, etc.")
             print("  unblur <object> — stop blurring that object")
@@ -536,14 +262,13 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int,
                 whisper_input = WhisperInput()
                 whisper_input.start()
 
-            # --- Blur state ---
+            # --- Blur state (sent to server, local tracking for console feedback) ---
             blur_targets: set[str] = set()
 
             # --- Shared state ---
             send_count = 0
             recv_count = 0
             latest_resp = None
-            debug_mode = False  # P toggles: show all segments with bboxes
             # FIFO queue for RTT: sender pushes timestamp, receiver pops.
             # Works because server responds in order (1 response per frame).
             send_deque: collections.deque[float] = collections.deque()
@@ -652,61 +377,11 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int,
                             print("  Aliases: " + ", ".join(f"{k}->{v}" for k, v in sorted(LABEL_ALIASES.items())))
                             print("  Commands: blur <obj>, unblur <obj>, clear, list, help")
 
-                    # Display
-                    if show and latest_resp is not None:
-                        # Apply blur effects before drawing overlay
-                        display = apply_blur_effects(frame, latest_resp, blur_targets)
-                        display = draw_overlay_fast(display, latest_resp, debug_mode)
-
-                        # Compute SAM FPS from update timestamps
-                        if len(sam_update_times) >= 2:
-                            sam_dt = sam_update_times[-1] - sam_update_times[0]
-                            sam_fps = (len(sam_update_times) - 1) / sam_dt if sam_dt > 0 else 0
-                        else:
-                            sam_fps = 0
-
-                        elapsed = time.perf_counter() - t_start
-                        sfps = send_count / elapsed if elapsed > 0 else 0
-                        rfps = recv_count / elapsed if elapsed > 0 else 0
-                        avg_rtt = np.mean(rtts[-60:]) if rtts else 0
-                        n_segs = len(latest_resp.segments)
-
-                        # HUD line 1: FPS (Mask = actual mask content updates)
-                        cv2.putText(display,
-                                    f"Client {rfps:.0f} fps | Mask {sam_fps:.1f} fps | RTT {avg_rtt:.0f}ms | {n_segs} segs",
-                                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                    (0, 255, 0), 1, cv2.LINE_AA)
-
-                        # HUD line 2: mode indicator
-                        mode_text = "[P] DEBUG: bboxes + detail" if debug_mode else "[P] contours + labels"
-                        cv2.putText(display, mode_text,
-                                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                                    (180, 180, 180), 1, cv2.LINE_AA)
-
-                        # HUD line 3: blur targets
-                        if blur_targets:
-                            blur_text = "BLUR: " + ", ".join(sorted(blur_targets))
-                            cv2.putText(display, blur_text,
-                                        (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                                        (0, 100, 255), 1, cv2.LINE_AA)
-
-                        cv2.imshow("SocialSenseAR", display)
-
-                        # Auto-save screenshot every 5s for visual iteration
-                        _now = time.perf_counter()
-                        if not hasattr(draw_overlay_fast, '_last_ss') or _now - draw_overlay_fast._last_ss >= 5.0:
-                            draw_overlay_fast._last_ss = _now
-                            import os
-                            ss_path = os.path.expanduser("~/Downloads/client_debug.png")
-                            cv2.imwrite(ss_path, display)
-                            print(f"Screenshot saved: {ss_path}")
-
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == ord("q"):
-                            break
-                        elif key == ord("p"):
-                            debug_mode = not debug_mode
-                            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+                        # Send command to server to update SAM3 active prompts
+                        if action in ("blur", "unblur", "clear"):
+                            ctrl = pb.ClientMessage()
+                            ctrl.control.command = raw_cmd.strip()
+                            await ws.send(ctrl.SerializeToString())
 
                     # Print stats periodically
                     if send_count % stats_interval == 0 and send_count > 0:
@@ -753,20 +428,17 @@ async def run_client(url: str, target_fps: int, show: bool, camera: int,
         print("\nStopped by user")
     finally:
         grabber.stop()
-        if show:
-            cv2.destroyAllWindows()
 
 
 def main():
     parser = argparse.ArgumentParser(description="SocialSenseAR test client")
     parser.add_argument("--url", default="ws://localhost:8765", help="Server URL")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS")
-    parser.add_argument("--show", action="store_true", help="Show overlay window")
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
     parser.add_argument("--whisper", action="store_true",
                         help="Enable voice commands via Whisper (requires openai-whisper + sounddevice)")
     args = parser.parse_args()
-    asyncio.run(run_client(args.url, args.fps, args.show, args.camera, args.whisper))
+    asyncio.run(run_client(args.url, args.fps, args.camera, args.whisper))
 
 
 if __name__ == "__main__":

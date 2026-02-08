@@ -82,6 +82,8 @@ class PipelineOrchestrator:
         self._sam_thread: threading.Thread | None = None
         self._sam_stop = threading.Event()
         self._sam_count = 0
+        self._sam_total_ms_accum = 0.0
+        self._sam_ms_accum = 0.0
 
         # --- Gemini labeling (background, every 2s) ---
         self._gemini_interval = 2.0
@@ -161,6 +163,42 @@ class PipelineOrchestrator:
             self._metrics_log = None
         self._initialized = False
         logger.info("Pipeline shut down")
+
+    # ------------------------------------------------------------------
+    # Dynamic prompt control
+    # ------------------------------------------------------------------
+
+    def set_active_prompts(self, prompts: set[str]):
+        """Replace active prompts. Clears tracks for removed labels."""
+        old = self._segmenter.get_active_prompts()
+        self._segmenter.set_active_prompts(prompts)
+        removed = old - prompts
+        if removed:
+            self._clear_tracks_for_labels(removed)
+
+    def add_prompt(self, prompt: str):
+        """Add a single prompt to the active set."""
+        self._segmenter.add_prompt(prompt)
+
+    def remove_prompt(self, prompt: str):
+        """Remove a single prompt. Clears matching tracks."""
+        self._segmenter.remove_prompt(prompt)
+        self._clear_tracks_for_labels({prompt})
+
+    def get_active_prompts(self) -> set[str]:
+        """Return current active prompts."""
+        return self._segmenter.get_active_prompts()
+
+    def _clear_tracks_for_labels(self, labels: set[str]):
+        """Remove tracks whose label matches any in the given set."""
+        to_remove = [tid for tid, track in self._tracks.items()
+                     if track.get("label") in labels]
+        for tid in to_remove:
+            del self._tracks[tid]
+        if to_remove:
+            # Clear cached result so next frame builds fresh segments
+            self._cached_result = None
+            logger.info(f"Cleared {len(to_remove)} tracks for removed prompts: {labels}")
 
     # ------------------------------------------------------------------
     # Frame processing — pre-decodes JPEG, returns cached result
@@ -356,16 +394,18 @@ class PipelineOrchestrator:
                 self._cached_result = result
 
                 total_ms = (time.perf_counter() - t0) * 1000
-                tracked_label = "Vcache" if decoder_skipped else "Vfresh"
-                if self._sam_count % 10 == 0 or self._sam_count <= 3:
-                    logger.info(
-                        f"SAM #{self._sam_count}: {total_ms:.0f}ms total "
-                        f"({sam_ms:.0f}ms SAM)[{tracked_label}], {len(tracked)} segs"
-                    )
-                # Track stability log — shows track IDs and labels every 50 cycles
-                if self._sam_count % 50 == 0:
+                self._sam_total_ms_accum += total_ms
+                self._sam_ms_accum += sam_ms
+                if self._sam_count % 120 == 0 and self._sam_count > 0:
+                    avg_total = self._sam_total_ms_accum / 120
+                    avg_sam = self._sam_ms_accum / 120
+                    self._sam_total_ms_accum = 0.0
+                    self._sam_ms_accum = 0.0
                     track_info = [(t.track_id, t.label) for t in tracked]
-                    logger.info(f"TRACKS: {track_info}")
+                    logger.info(
+                        f"SAM #{self._sam_count}: avg {avg_total:.0f}ms total "
+                        f"({avg_sam:.0f}ms SAM), {len(tracked)} segs | {track_info}"
+                    )
 
                 # Write structured metrics
                 if self._metrics_log:
@@ -578,22 +618,9 @@ class PipelineOrchestrator:
                 track["area"] = seg_areas[si]
                 track["last_seen"] = now
 
-                # Temporal mask smoothing — keep old mask if shape is similar.
-                # Prevents outline jitter on paintings/screens where SAM produces
-                # slightly different masks each frame.
-                old_seg = track.get("seg")
-                if old_seg is not None and old_seg.mask is not None and seg.mask is not None:
-                    old_m = old_seg.mask
-                    new_m = seg.mask
-                    if old_m.shape == new_m.shape:
-                        old_b = old_m > 127 if old_m.dtype == np.uint8 else old_m > 0.5
-                        new_b = new_m > 127 if new_m.dtype == np.uint8 else new_m > 0.5
-                        inter = np.count_nonzero(old_b & new_b)
-                        union = np.count_nonzero(old_b | new_b)
-                        iou = inter / max(1, union)
-                        if iou > 0.65:
-                            # Shapes are similar — keep old mask (stable outline)
-                            seg.mask = old_seg.mask
+                # Always use the fresh mask from SAM — no temporal smoothing.
+                # Old logic kept the previous mask when IoU > 0.65, which prevented
+                # jitter on static objects but made masks feel stuck during movement.
                 track["seg"] = seg
                 # Only set label if track has no confirmed label yet.
                 # Gemini (_background_label) is the authority for label updates.
