@@ -189,6 +189,14 @@ class SocialSenseServer:
                 proto_seg.emotion.emoji = seg.emotion.get("emoji", "")
                 proto_seg.emotion.confidence = seg.emotion.get("confidence", 0.0)
 
+            # Voice agent effects
+            if seg.effect is not None:
+                proto_seg.effect.effect_type = seg.effect.effect_type
+                proto_seg.effect.intensity = seg.effect.intensity
+                proto_seg.effect.color_hex = seg.effect.color_hex
+                for k, v in seg.effect.params.items():
+                    proto_seg.effect.params[k] = v
+
         # Conversation state
         conv_state = self.pipeline.get_conversation_state()
         if conv_state:
@@ -198,6 +206,22 @@ class SocialSenseServer:
             response.conversation.question = conv_state.get("question", "")
             response.conversation.is_other_speaking = conv_state.get("is_other_speaking", False)
             response.conversation.is_user_speaking = conv_state.get("is_user_speaking", False)
+
+            # Voice agent state
+            if "listening" in conv_state:
+                response.conversation.voice_agent.listening = conv_state.get("listening", False)
+                response.conversation.voice_agent.recording = conv_state.get("recording", False)
+                response.conversation.voice_agent.partial_transcript = conv_state.get("partial_transcript", "")
+                response.conversation.voice_agent.last_command = conv_state.get("last_command", "")
+                response.conversation.voice_agent.last_response = conv_state.get("last_response", "")
+                response.conversation.voice_agent.last_command_time = conv_state.get("last_command_time", 0.0)
+
+        # Full-screen filter state
+        if self.pipeline and hasattr(self.pipeline, '_voice_agent') and self.pipeline._voice_agent:
+            fs_filter = self.pipeline._voice_agent.get_full_screen_filter()
+            if fs_filter:
+                response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
+                response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
 
         # Metrics — report honest wall-clock time
         proto_ms = (time.perf_counter() - t0) * 1000
@@ -346,6 +370,33 @@ class SocialSenseServer:
             y += 16
 
         y += 10
+
+        # Voice Agent Status
+        if response.conversation.voice_agent.listening or response.conversation.voice_agent.recording:
+            cv2.putText(panel, "VOICE AGENT", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+            y += 5
+            cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+            y += 18
+
+            if response.conversation.voice_agent.recording:
+                status = "RECORDING..."
+                status_color = (0, 255, 0)  # green
+            else:
+                status = "Listening"
+                status_color = (200, 200, 200)
+
+            cv2.putText(panel, status, (12, y), font, 0.35, status_color, 1, cv2.LINE_AA)
+            y += 16
+
+            if response.conversation.voice_agent.last_response:
+                # Wrap long response text
+                resp = response.conversation.voice_agent.last_response
+                if len(resp) > 25:
+                    resp = resp[:25] + "..."
+                cv2.putText(panel, resp, (12, y), font, 0.3, (180, 180, 180), 1, cv2.LINE_AA)
+                y += 14
+
+            y += 10
 
         # Stats
         cv2.putText(panel, "STATS", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)

@@ -62,8 +62,9 @@ _ASSET_CLASS_MAP = {
     "ceiling": "structure", "door": "structure", "window": "structure",
 }
 
-# Project root (for finding engine files)
+# Project root (for finding engine files); config dir for meta JSONs
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_CONFIG_DIR = os.path.join(_PROJECT_ROOT, "config")
 
 
 class SAM3Segmenter:
@@ -315,13 +316,14 @@ class SAM3Segmenter:
             return None
 
         def _find_meta():
-            """Find meta JSON: try _<res> suffix first, then unsuffixed."""
-            suffixed = os.path.join(_PROJECT_ROOT, f"sam3_meta_{res}.json")
-            unsuffixed = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
-            if os.path.exists(suffixed):
-                return suffixed
-            if os.path.exists(unsuffixed):
-                return unsuffixed
+            """Find meta JSON in config/ or project root: try _<res> suffix first, then unsuffixed."""
+            for base in (_CONFIG_DIR, _PROJECT_ROOT):
+                suffixed = os.path.join(base, f"sam3_meta_{res}.json")
+                unsuffixed = os.path.join(base, "sam3_meta.json")
+                if os.path.exists(suffixed):
+                    return suffixed
+                if os.path.exists(unsuffixed):
+                    return unsuffixed
             return None
 
         # Prefer INT8 engine over FP16 (better perf on Ampere+)
@@ -802,9 +804,19 @@ class SAM3Segmenter:
         self._trt_vis_context = self._trt_vis_engine.create_execution_context()
         self._trt_vis_stream = _torch.cuda.Stream()
 
-        # Read output shapes from meta.json
-        meta_path = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
+        # Read output shapes from meta.json (config/ or project root)
         import json
+        res = getattr(self.config, "sam3_resolution", 1008)
+        for base in (_CONFIG_DIR, _PROJECT_ROOT):
+            for name in (f"sam3_meta_{res}.json", "sam3_meta.json"):
+                meta_path = os.path.join(base, name)
+                if os.path.exists(meta_path):
+                    break
+            else:
+                continue
+            break
+        else:
+            meta_path = os.path.join(_PROJECT_ROOT, "sam3_meta.json")
         with open(meta_path) as f:
             meta = json.load(f)
         self._trt_meta = meta  # Store for decoder init + resolution flexibility

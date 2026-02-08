@@ -74,6 +74,30 @@ class PipelineOrchestrator:
             self._labeler = GeminiLabeler(config)
             logger.info("Pipeline mode: Legacy (FastSAM + MediaPipe + Gemini)")
 
+        # Audio / Voice Agent components
+        self._voice_agent = None
+        if config.audio_enabled:
+            from server.audio.transcriber import WhisperTranscriber
+            from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
+            from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
+
+            self._transcriber = WhisperTranscriber(
+                api_key=config.openai_api_key,
+                model=config.whisper_model,
+            )
+            self._voice_planner = VoiceCommandPlanner(api_key=config.gemini_api_key)
+            self._scene_understanding = GeminiSceneUnderstanding(api_key=config.gemini_api_key)
+
+            self._voice_agent = VoiceAgent(
+                transcriber=self._transcriber,
+                planner=self._voice_planner,
+                scene_understanding=self._scene_understanding,
+                config=config,
+            )
+            logger.info("Voice agent pipeline created (will initialize on first frame)")
+        else:
+            logger.info("Audio disabled — voice agent not created")
+
         # --- Continuous SAM thread ---
         # Pre-decoded BGR frame from ws thread (overlaps decode with SAM GPU work)
         self._latest_frame: tuple | None = None  # (frame_bgr, fw, fh, frame_id)
@@ -138,8 +162,19 @@ class PipelineOrchestrator:
         else:
             t_lbl = t_seg
 
+        # Initialize voice agent components
+        if self._voice_agent is not None:
+            self._transcriber.initialize()
+            self._voice_planner.initialize()
+            self._scene_understanding.initialize()
+            self._voice_agent.start()
+            t_voice = time.perf_counter()
+            logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+        else:
+            t_voice = t_lbl
+
         self._initialized = True
-        logger.info(f"Pipeline ready ({(t_lbl - t0)*1000:.0f}ms)")
+        logger.info(f"Pipeline ready ({(t_voice - t0)*1000:.0f}ms)")
 
     def reset(self):
         self._tracks.clear()
@@ -158,6 +193,11 @@ class PipelineOrchestrator:
         self._segmenter.shutdown()
         if self._labeler is not None:
             self._labeler.shutdown()
+        if self._voice_agent is not None:
+            self._voice_agent.shutdown()
+            self._transcriber.shutdown()
+            self._voice_planner.shutdown()
+            self._scene_understanding.shutdown()
         if self._metrics_log:
             self._metrics_log.close()
             self._metrics_log = None
@@ -374,10 +414,22 @@ class PipelineOrchestrator:
                 self._update_tracks(new_segments, now, fh, fw)
                 tracked = self._get_tracked_output(now, fh, fw)
 
-                # 6. Encode RLE
+                # 5. Apply voice agent effects to tracked segments
+                self._apply_voice_effects(tracked)
+
+                # 6. Sync voice agent known objects with SAM3 (register segments as known)
+                if self._voice_agent is not None and self.config.pipeline_mode == "sam3":
+                    for seg in tracked:
+                        if seg.label and not seg.label.startswith("~"):
+                            self._voice_agent.add_known_object(seg.label)
+
+                    # Update voice agent with latest frame for Gemini Vision
+                    self._voice_agent.update_frame(frame_bgr)
+
+                # 7. Encode RLE
                 self._encode_rle_all(tracked, fw, fh)
 
-                # 7. Atomic cache update
+                # 8. Atomic cache update
                 result = PipelineResult()
                 result.segments = tracked
                 result.fastsam_ms = sam_ms
@@ -685,11 +737,50 @@ class PipelineOrchestrator:
         return output
 
     # ------------------------------------------------------------------
-    # Audio pipeline (stub — Phase 4)
+    # Voice Agent Effects Application
+    # ------------------------------------------------------------------
+
+    def _apply_voice_effects(self, segments: list):
+        """Apply voice agent effects to tracked segments.
+
+        Sets EffectData on each segment based on voice agent's active effects registry.
+        """
+        if self._voice_agent is None:
+            return
+
+        active_effects = self._voice_agent.get_active_effects()
+        if not active_effects:
+            return
+
+        from server.vision.segment_data import EffectData
+
+        for seg in segments:
+            if seg.label and seg.label in active_effects:
+                fx = active_effects[seg.label]
+                seg.effect = EffectData(
+                    effect_type=fx.get("type", "none"),
+                    intensity=fx.get("intensity", 1.0),
+                )
+
+    # ------------------------------------------------------------------
+    # Audio pipeline — Voice Agent
     # ------------------------------------------------------------------
 
     def process_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
-        pass
+        """Feed audio to voice agent for transcription + command processing.
+
+        Called from websocket thread. Audio processing happens asynchronously.
+        """
+        if self._voice_agent is not None:
+            self._voice_agent.ingest_audio(pcm16_data, sample_rate, num_samples)
 
     def get_conversation_state(self) -> dict:
-        return self._conversation_state if self._conversation_state else {}
+        """Get conversation state for protobuf (includes voice agent state)."""
+        base_state = self._conversation_state.copy() if self._conversation_state else {}
+
+        # Merge voice agent state
+        if self._voice_agent is not None:
+            voice_state = self._voice_agent.get_conversation_state()
+            base_state.update(voice_state)
+
+        return base_state

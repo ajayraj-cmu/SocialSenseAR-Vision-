@@ -12,7 +12,8 @@ import os
 import sys
 import time
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Repo root (parent of scripts/)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def build_engine(onnx_path, engine_path):
