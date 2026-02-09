@@ -43,7 +43,7 @@ class ServerConfig:
     )
 
     # Gemini Vision
-    gemini_model: str = "gemini-2.0-flash"  # current model (gemini-1.5-flash is 404)
+    gemini_model: str = "gemini-2.5-flash"
     gemini_min_interval: float = 6.0    # seconds between API calls
     gemini_max_calls_per_minute: int = 5
     gemini_label_cache_ttl: float = 30.0  # seconds

@@ -47,7 +47,7 @@ except ImportError:
         AUDIO_ENABLED = False
         DEBUG_VIEW = False
         METRICS_LOG_PATH = None
-        GEMINI_MODEL = "gemini-2.0-flash"
+        GEMINI_MODEL = "gemini-2.5-flash"
         CACHE_MOUNT_PATH = "/cache"
 
         @staticmethod
@@ -102,7 +102,7 @@ image = (
         "safetensors>=0.4.3",
         "Pillow>=10.0.0",
         "scikit-learn>=1.5.0",
-        "google-generativeai>=0.3.0",
+        "google-genai>=1.0.0",
         "openai>=1.0.0",
         "webrtcvad>=2.0.10",
         "mediapipe>=0.10.0",
@@ -206,7 +206,7 @@ class SocialSenseGPU:
             AUDIO_ENABLED = False
             DEBUG_VIEW = False
             METRICS_LOG_PATH = None
-            GEMINI_MODEL = "gemini-2.0-flash"
+            GEMINI_MODEL = "gemini-2.5-flash"
 
         self.server_config = ServerConfig(
             device="cuda",

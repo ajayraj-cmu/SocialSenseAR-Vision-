@@ -162,14 +162,14 @@ class VoiceCommandPlanner:
     - Full-screen filters ("dim everything")
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash"):
+    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash"):
         self._api_key = api_key
         self._model = model
         self._client = None
         self._available = False
 
     def initialize(self):
-        """Initialize Gemini API client."""
+        """Initialize Gemini API client (google.genai SDK)."""
         import os
         api_key = self._api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -177,9 +177,8 @@ class VoiceCommandPlanner:
             return
 
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            self._client = genai.GenerativeModel(self._model)
+            from google import genai
+            self._client = genai.Client(api_key=api_key)
             self._available = True
             logger.info(f"Voice command planner ready (model={self._model})")
         except Exception as e:
@@ -206,14 +205,8 @@ class VoiceCommandPlanner:
             CommandPlan with targets, effect, action, reasoning
         """
         if not self._available:
-            logger.warning(f"Gemini unavailable, treating utterance as raw label: {utterance}")
-            return CommandPlan(
-                targets=[utterance.strip().lower()],
-                effect_type="blur",
-                intensity=1.0,
-                action="add",
-                reasoning="Gemini unavailable — raw label",
-            )
+            logger.warning(f"Gemini unavailable, extracting targets from text: {utterance}")
+            return self._emergency_parse(utterance)
 
         try:
             known_str = ', '.join(sorted(known_objects)) if known_objects else 'none'
@@ -256,7 +249,9 @@ Rules:
     "reasoning": "User wants to pixelate the phone"
 }}"""
 
-            response = self._client.generate_content(prompt)
+            response = self._client.models.generate_content(
+                model=self._model, contents=prompt
+            )
             text = response.text.strip()
 
             # Parse JSON
@@ -283,15 +278,63 @@ Rules:
             return plan
 
         except Exception as e:
-            # Gemini error — treat the raw utterance as a label rather than failing silently
             logger.error(f"Gemini planning error: {e}")
-            return CommandPlan(
-                targets=[utterance.strip().lower()],
-                effect_type="blur",
-                intensity=0.8,
-                action="add",
-                reasoning=f"Gemini error, raw label: {e}",
-            )
+            return self._emergency_parse(utterance)
+
+    def _emergency_parse(self, utterance: str) -> CommandPlan:
+        """Extract targets from text when Gemini is down. Not a full NLP parser —
+        just strips obvious action/filler words and returns the object nouns."""
+        text = utterance.lower().strip()
+
+        # Detect effect type
+        effect = "blur"
+        for keyword, etype in [("dim", "dim"), ("darken", "dim"), ("pixelate", "pixelate"),
+                                ("highlight", "highlight"), ("outline", "outline")]:
+            if keyword in text:
+                effect = etype
+                break
+
+        # Detect action
+        action = "add"
+        if any(w in text for w in ["stop", "remove", "unblur", "undim", "off"]):
+            action = "remove"
+
+        # Detect negation
+        invert = False
+        negation = re.search(
+            r'(?:everything|all)\s+(?:but|except|around|other\s+than|besides)\s+(?:the\s+)?',
+            text,
+        )
+        if negation:
+            invert = True
+            # Object is after the negation phrase
+            text = text[negation.end():]
+
+        # Strip action/filler words, keep object nouns
+        skip = {
+            "blur", "dim", "darken", "pixelate", "highlight", "outline",
+            "unblur", "stop", "remove", "off", "undim", "clear",
+            "everything", "all", "but", "except", "around", "the",
+            "a", "an", "my", "that", "this", "please", "can", "you",
+            "other", "than", "besides", "me", "it", "on",
+        }
+        targets = [w for w in text.split() if w not in skip]
+
+        # "me"/"myself" → "person"
+        targets = ["person" if t in ("me", "myself", "us") else t for t in targets]
+
+        if not targets:
+            targets = [text]  # last resort: use whole text
+
+        logger.info(f"Emergency parse: {action} {effect} → {targets} (invert={invert})")
+        return CommandPlan(
+            targets=targets,
+            effect_type=effect,
+            intensity=0.8,
+            action=action,
+            invert=invert,
+            reasoning="Gemini unavailable — emergency parse",
+        )
 
     def shutdown(self):
         """Clean up."""

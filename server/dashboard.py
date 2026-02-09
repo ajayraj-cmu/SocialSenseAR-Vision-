@@ -61,6 +61,7 @@ class Dashboard:
         self._window_created = False
         self._render_error_count = 0
         self._last_seg_debug = 0.0
+        self._show_segments = True
 
         # Create window with GUI_NORMAL for macOS title bar (red/yellow/green buttons)
         cv2.namedWindow(self.window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
@@ -131,39 +132,74 @@ class Dashboard:
                     mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_LINEAR)
                 mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
 
-                # Apply blur effect if present
+                # Apply visual effect if present
                 effect = getattr(seg, 'effect', None)
                 effect_type = ""
                 is_inverted = False
+                intensity = 1.0
                 if effect:
                     effect_type = getattr(effect, 'effect_type', '')
                     params = getattr(effect, 'params', {})
                     is_inverted = params.get("invert", "") == "true" if params else False
+                    try:
+                        intensity = float(params.get("intensity", 1.0)) if params else 1.0
+                    except (ValueError, TypeError):
+                        intensity = 1.0
 
-                if effect_type == "blur":
+                if effect_type and effect_type != "none":
                     mask_bool = mask_u8 > 128
                     if is_inverted:
-                        mask_bool = ~mask_bool  # Blur everything OUTSIDE the mask
-                    blurred = cv2.GaussianBlur(display_frame, (51, 51), 0)
-                    display_frame[mask_bool] = blurred[mask_bool]
+                        mask_bool = ~mask_bool
 
-                # Draw contours
-                contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
-                    cv2.drawContours(display_frame, contours, -1, (0, 0, 0), 5)
-                    cv2.drawContours(display_frame, contours, -1, color, 2)
+                    if effect_type == "blur":
+                        ksize = max(3, int(51 * intensity)) | 1  # must be odd
+                        blurred = cv2.GaussianBlur(display_frame, (ksize, ksize), 0)
+                        display_frame[mask_bool] = blurred[mask_bool]
 
-                    # Draw label
-                    label = getattr(seg, 'label', '') or getattr(seg, 'asset_class', '') or ''
-                    if effect_type and effect_type != "none":
-                        label = f"{label} [{effect_type}]"
-                    if label:
-                        cx = int(getattr(seg, 'center_x', 0.5) * fw)
-                        cy = int(getattr(seg, 'center_y', 0.5) * fh)
-                        (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                        cv2.rectangle(display_frame, (cx - 3, cy - th_ - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
-                        cv2.putText(display_frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    elif effect_type == "dim":
+                        dimmed = (display_frame * (1.0 - 0.7 * intensity)).astype(np.uint8)
+                        display_frame[mask_bool] = dimmed[mask_bool]
+
+                    elif effect_type == "pixelate":
+                        block = max(4, int(20 * intensity))
+                        h, w = display_frame.shape[:2]
+                        small = cv2.resize(display_frame, (w // block, h // block), interpolation=cv2.INTER_LINEAR)
+                        pixelated = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+                        display_frame[mask_bool] = pixelated[mask_bool]
+
+                    elif effect_type == "highlight":
+                        bright = cv2.addWeighted(display_frame, 1.0, np.full_like(display_frame, 255), 0.3 * intensity, 0)
+                        tint = bright.copy()
+                        tint[:, :, 0] = np.clip(tint[:, :, 0].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)  # yellow-ish tint (add green)
+                        tint[:, :, 2] = np.clip(tint[:, :, 2].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)  # add red
+                        display_frame[mask_bool] = tint[mask_bool]
+
+                    elif effect_type == "outline":
+                        pass  # outline is drawn below in contour section
+
+                # Draw contours and labels (hidden with Ctrl+P)
+                if self._show_segments or effect_type == "outline":
+                    contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        color = self._BRIGHT_COLORS[i % len(self._BRIGHT_COLORS)]
+                        if effect_type == "outline":
+                            thickness = max(3, int(8 * intensity))
+                            cv2.drawContours(display_frame, contours, -1, (0, 0, 0), thickness + 3)
+                            cv2.drawContours(display_frame, contours, -1, color, thickness)
+                        elif self._show_segments:
+                            cv2.drawContours(display_frame, contours, -1, (0, 0, 0), 5)
+                            cv2.drawContours(display_frame, contours, -1, color, 2)
+
+                        if self._show_segments:
+                            label = getattr(seg, 'label', '') or getattr(seg, 'asset_class', '') or ''
+                            if effect_type and effect_type != "none":
+                                label = f"{label} [{effect_type}]"
+                            if label:
+                                cx = int(getattr(seg, 'center_x', 0.5) * fw)
+                                cy = int(getattr(seg, 'center_y', 0.5) * fh)
+                                (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                                cv2.rectangle(display_frame, (cx - 3, cy - th_ - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
+                                cv2.putText(display_frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             except Exception as e:
                 self._render_error_count += 1
                 if self._render_error_count <= 5:
@@ -318,7 +354,8 @@ class Dashboard:
         input_display = f"> {self._input_text}{cursor}"
         cv2.putText(bar, input_display, (10, 27), font, 0.5, self._CURSOR_COLOR, 1, cv2.LINE_AA)
 
-        hint = "Type command + Enter  |  ESC clear"
+        seg_hint = "^P labels ON" if self._show_segments else "^P labels OFF"
+        hint = f"Enter send | ESC clear | {seg_hint} | ^Q quit"
         (hw, _), _ = cv2.getTextSize(hint, font, 0.3, 1)
         cv2.putText(bar, hint, (canvas_w - hw - 10, 27), font, 0.3, (80, 80, 80), 1, cv2.LINE_AA)
 
@@ -368,7 +405,11 @@ class Dashboard:
             if self.on_command:
                 self.on_command("clear")
             self._input_text = ""
-        elif key == ord('q') or key == ord('Q'):  # Q — quit
+        elif key == 16:  # Ctrl+P — toggle segment labels/outlines
+            self._show_segments = not self._show_segments
+            state = "ON" if self._show_segments else "OFF"
+            self.log(f"Segments: {state}")
+        elif key == 17:  # Ctrl+Q — quit
             self.close()
             import os
             os._exit(0)

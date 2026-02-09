@@ -41,7 +41,7 @@ SAM3_CACHE_TTL = 4.0  # Mask cache lifetime (seconds)
 SAM3_CONFIDENCE_THRESHOLD = 0.12  # Minimum confidence for mask
 
 # Gemini configuration
-GEMINI_MODEL = "gemini-2.0-flash"  # Fast + accurate for scene understanding
+GEMINI_MODEL = "gemini-2.5-flash"  # Fast + accurate for scene understanding
 GEMINI_MIN_INTERVAL = 6.0  # Min seconds between API calls
 GEMINI_CACHE_TTL = 30.0  # Scene cache lifetime
 

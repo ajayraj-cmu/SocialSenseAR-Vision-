@@ -231,13 +231,19 @@ float intensity = seg.Effect?.Intensity ?? 0f;
 
 ### Per-effect rendering strategies
 
-| Effect | Approach | Implementation |
-|--------|----------|----------------|
-| **blur** | Render mask to stencil texture, apply Gaussian blur post-process on passthrough within mask | Compute shader or multi-pass Kawase blur on a separate RenderTexture, composite via stencil |
-| **dim** | Darken pixels within mask by intensity | Simple: write darker color in pixel buffer (`Color32` with reduced RGB). Better: shader uniform per-segment |
-| **pixelate** | Downsample+upsample within mask region | Render passthrough at low res, upscale with nearest-neighbor sampling, mask to segment area |
-| **highlight** | Brighten + optional tint border | Write bright tint in pixel buffer, or glow shader pass with mask |
-| **outline** | Already implemented | Existing `DrawOutlineFromMask()` — use `ColorHex` from effect if provided |
+All 5 effects are **fully implemented on the server dashboard** (`server/dashboard.py`) and serve as the reference implementation. The Unity client must match this behavior.
+
+| Effect | Server (OpenCV) | Unity Approach | Invert Support |
+|--------|----------------|----------------|:-:|
+| **blur** | `cv2.GaussianBlur(ksize=51*intensity)` applied to masked pixels | Kawase blur on RenderTexture, composite via stencil mask | Yes |
+| **dim** | `frame * (1 - 0.7*intensity)` on masked pixels — darkens to ~30% brightness at full | Semi-transparent black overlay in mask region (`alpha = 0.7 * intensity`) | Yes |
+| **pixelate** | Resize down (`w/block, h/block`) then back up with `INTER_NEAREST` — block size `max(4, 20*intensity)` | Sample passthrough at floored UV grid in shader — `floor(uv * blockCount) / blockCount` | Yes |
+| **highlight** | `addWeighted(frame, 1.0, white, 0.3*intensity)` + warm yellow tint (+40 to R,G channels) | Brighten + warm tint: `color.rgb = lerp(color.rgb, float3(1,1,0.7), 0.3*intensity)` | Yes |
+| **outline** | Thicker contours: `thickness = max(3, 8*intensity)` with black shadow, bright color fill | Existing `DrawOutlineFromMask()` with `outlineWidth = max(3, 8*intensity)`, use segment color or `ColorHex` | Yes |
+
+### Invert behavior
+
+All effects support `invert: true`. When inverted, the effect applies to everything **outside** the mask (e.g., "blur everything but person" = blur outside person's mask, person stays sharp). On the server: `mask_bool = ~mask_bool`. In Unity: flip the stencil test or invert the mask texture.
 
 ### Recommended approach: Hybrid CPU + Shader
 
@@ -246,17 +252,19 @@ float intensity = seg.Effect?.Intensity ?? 0f;
 // In DecodeRleIntoBuffer, modify color based on effect:
 if (effectType == "dim")
 {
-    float dim = 1f - intensity;
-    color = new Color32(
-        (byte)(color.r * dim),
-        (byte)(color.g * dim),
-        (byte)(color.b * dim),
-        (byte)(200 * intensity)  // semi-transparent dark overlay
-    );
+    // Match server: darken by 70% at full intensity
+    float dim = 1f - (0.7f * intensity);
+    color = new Color32(0, 0, 0, (byte)(178 * intensity));  // semi-transparent black overlay
 }
 else if (effectType == "highlight")
 {
-    color = new Color32(255, 255, 100, (byte)(120 * intensity));
+    // Match server: brighten + warm yellow tint
+    color = new Color32(255, 255, 180, (byte)(76 * intensity));  // warm bright overlay
+}
+else if (effectType == "outline")
+{
+    // Thicker outline — scale width with intensity
+    outlineWidth = Mathf.Max(3, Mathf.RoundToInt(8 * intensity));
 }
 ```
 
@@ -274,12 +282,35 @@ This requires access to the passthrough camera texture, which Quest provides via
 ### New shader: `Assets/Scripts/Shaders/SegmentEffects.shader`
 
 ```hlsl
-// Per-fragment: sample mask texture
-// If mask > 0: apply effect based on encoded type
-//   blur: sample passthrough at offset positions, average (Gaussian kernel)
-//   pixelate: floor UV to grid, sample center of grid cell
-//   dim: multiply passthrough color by (1 - intensity)
-// Output blended result
+// Uniforms: _MaskTex, _EffectType (int), _Intensity (float), _BlockSize (float)
+// Per-fragment:
+half4 frag(v2f i) : SV_Target
+{
+    float mask = tex2D(_MaskTex, i.uv).r;
+    if (mask < 0.5) discard;  // no effect outside mask
+
+    half4 color = tex2D(_PassthroughTex, i.uv);
+
+    if (_EffectType == 1) // blur
+    {
+        // 9-tap Gaussian (or Kawase multi-pass for quality)
+        half4 sum = 0;
+        float2 texelSize = _PassthroughTex_TexelSize.xy * _Intensity * 4.0;
+        for (int x = -1; x <= 1; x++)
+            for (int y = -1; y <= 1; y++)
+                sum += tex2D(_PassthroughTex, i.uv + float2(x, y) * texelSize);
+        color = sum / 9.0;
+    }
+    else if (_EffectType == 2) // pixelate
+    {
+        // Match server: block = max(4, 20*intensity), then floor UV
+        float blockSize = max(4.0, 20.0 * _Intensity);
+        float2 blockCount = _ScreenParams.xy / blockSize;
+        float2 blockUV = floor(i.uv * blockCount) / blockCount;
+        color = tex2D(_PassthroughTex, blockUV);
+    }
+    return color;
+}
 ```
 
 ---
@@ -488,10 +519,30 @@ Step 6 (Integration)       <- Depends on all above
 
 ## Testing
 
+### Server dashboard (reference — already working)
+
+All 5 effects can be tested via the Python test client dashboard before touching Unity:
+- `blur person` — Gaussian blur on person mask
+- `dim laptop` — darken laptop region to ~30% brightness
+- `pixelate phone` — mosaic/block effect on phone
+- `highlight cup` — brighten + warm yellow tint on cup
+- `outline person` — thick colored contour around person
+- `blur everything but person` — blur everywhere except person (invert)
+- `clear` — remove all effects and prompts
+
+### Unity integration
+
 1. **Editor mode**: Run server locally (`python -m server.main --device cuda`), connect Unity editor via WebSocket, verify audio streams to server and voice agent state appears in HUD
-2. **Quest build**: Deploy APK, connect to Modal server, say "Hey Vibe, blur the laptop, thank you" — verify:
+2. **Effect parity**: For each effect type, compare Unity rendering side-by-side with server dashboard to ensure visual match
+3. **Quest build**: Deploy APK, connect to Modal server, say "Hey Vibe, blur the laptop, thank you" — verify:
    - Dashboard/HUD shows "Recording..." during speech
    - Laptop mask appears with blur effect overlay
    - Voice agent response displayed
-3. **Full-screen filter**: Say "Hey Vibe, it's too bright, dim everything, thank you" — verify screen darkens
-4. **Effect removal**: Say "Hey Vibe, stop blurring the laptop, thank you" — verify blur removed, segment still tracked
+4. **All effects on Quest**: Test each effect type via voice commands:
+   - "Hey Vibe, dim the person, thank you" — person region darkens
+   - "Hey Vibe, pixelate the laptop, thank you" — laptop gets mosaic effect
+   - "Hey Vibe, highlight my phone, thank you" — phone brightens with warm tint
+   - "Hey Vibe, outline the cup, thank you" — thick colored outline around cup
+5. **Invert on Quest**: "Hey Vibe, blur everything but me, thank you" — everything except person blurs
+6. **Full-screen filter**: Say "Hey Vibe, it's too bright, dim everything, thank you" — verify screen darkens
+7. **Effect removal**: Say "Hey Vibe, stop blurring the laptop, thank you" — verify blur removed, segment still tracked

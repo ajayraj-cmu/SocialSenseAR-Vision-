@@ -146,7 +146,7 @@ export GEMINI_API_KEY="..."  # or GOOGLE_API_KEY
 
 ### Python Dependencies
 ```bash
-pip install openai google-generativeai sounddevice
+pip install openai google-genai sounddevice
 ```
 
 ### Server Configuration
@@ -172,8 +172,8 @@ Wait for:
 Pipeline mode: SAM3 (text-prompted, no Gemini)
 Voice agent pipeline created (will initialize on first frame)
 Whisper transcriber ready (model=whisper-1)
-Voice command planner ready (model=gemini-2.0-flash-exp)
-Gemini scene understanding ready (model=gemini-2.0-flash-exp)
+Voice command planner ready (model=gemini-2.5-flash)
+Gemini scene understanding ready (model=gemini-2.5-flash)
 VoiceAgent started
 ```
 

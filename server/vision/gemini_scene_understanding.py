@@ -27,7 +27,7 @@ class GeminiSceneUnderstanding:
     Caches results for a short TTL to avoid redundant calls during a single request.
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash", cache_ttl: float = 10.0):
+    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash", cache_ttl: float = 10.0):
         self._api_key = api_key
         self._model = model
         self._cache_ttl = cache_ttl
@@ -47,9 +47,8 @@ class GeminiSceneUnderstanding:
             return
 
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            self._client = genai.GenerativeModel(self._model)
+            from google import genai
+            self._client = genai.Client(api_key=api_key)
             self._available = True
             logger.info(f"Gemini scene understanding ready (model={self._model})")
         except Exception as e:
@@ -111,7 +110,9 @@ Format your response as JSON:
 
 Be thorough with object detection - include everything you can identify."""
 
-            response = self._client.generate_content([prompt, pil_img])
+            response = self._client.models.generate_content(
+                model=self._model, contents=[prompt, pil_img]
+            )
             text = response.text.strip()
 
             # Parse JSON response (handle markdown code blocks)
@@ -184,7 +185,9 @@ Format as JSON:
     "reasoning": "explanation"
 }}"""
 
-            response = self._client.generate_content(prompt)
+            response = self._client.models.generate_content(
+                model=self._model, contents=prompt
+            )
             text = response.text.strip()
 
             # Parse JSON (handle markdown)

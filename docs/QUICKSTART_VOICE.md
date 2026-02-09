@@ -6,7 +6,7 @@ Get up and running with voice control in 5 minutes!
 
 ```bash
 # 1. Install dependencies
-pip install openai google-generativeai sounddevice
+pip install openai google-genai sounddevice
 
 # 2. Set API keys
 export OPENAI_API_KEY="sk-..."      # For Whisper transcription
@@ -23,7 +23,7 @@ Wait for these messages:
 ```
 ✓ Pipeline mode: SAM3 (text-prompted, no Gemini)
 ✓ Whisper transcriber ready (model=whisper-1)
-✓ Voice command planner ready (model=gemini-2.0-flash-exp)
+✓ Voice command planner ready (model=gemini-2.5-flash)
 ✓ Gemini scene understanding ready
 ✓ VoiceAgent started
 ✓ Server ready. Waiting for Quest connection...
