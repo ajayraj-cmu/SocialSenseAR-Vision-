@@ -165,6 +165,9 @@ class SocialSenseServer:
         response.masks_updated = not getattr(result, 'decoder_skipped', True)
         response.timestamp_ms = time.time() * 1000
 
+        # Check if effects were explicitly cleared (for Unity to reset persistent blur)
+        response.effects_cleared = self.pipeline.consume_effects_cleared()
+
         for seg in result.segments:
             proto_seg = response.segments.add()
             # Strip ~ prefix (internal "pending Gemini" marker)

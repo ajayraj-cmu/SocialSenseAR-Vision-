@@ -47,6 +47,9 @@ message ServerMessage {
   // True when SAM decoder produced new masks (false = cached/unchanged masks)
   bool masks_updated = 6;
 
+  // True when all effects were explicitly cleared (distinguishes "clear" from "target not detected")
+  bool effects_cleared = 7;
+
   // All segmented objects in the scene
   repeated SceneSegment segments = 10;
 

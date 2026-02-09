@@ -155,6 +155,9 @@ class PipelineOrchestrator:
         self._effect_registry: dict[str, dict] = {}
         self._effect_lock = threading.Lock()
 
+        # Flag set when effects are explicitly cleared (for Unity to distinguish from "target not detected")
+        self._effects_cleared = False
+
         self._frame_count = 0
         self._initialized = False
 
@@ -301,7 +304,20 @@ class PipelineOrchestrator:
         """Clear all effects."""
         with self._effect_lock:
             self._effect_registry.clear()
+            self._effects_cleared = True  # Signal Unity to reset persistent blur
         logger.info("All effects cleared")
+
+    def consume_effects_cleared(self) -> bool:
+        """Check and reset the effects_cleared flag.
+
+        Returns True once after clear_effects() is called, then False.
+        This allows Unity to distinguish "clear command" from "target not detected".
+        """
+        with self._effect_lock:
+            if self._effects_cleared:
+                self._effects_cleared = False
+                return True
+            return False
 
     def get_effects(self) -> dict[str, dict]:
         """Get copy of active effects."""
