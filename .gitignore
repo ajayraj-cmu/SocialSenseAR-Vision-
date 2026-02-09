@@ -89,3 +89,4 @@ Thumbs.db
 # Allow example so users know which keys to set
 !.env.example
 /calibration_frames
+/archive/

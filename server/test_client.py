@@ -42,6 +42,7 @@ import websockets
 sys.path.insert(0, ".")
 from server.proto import socialsense_pb2 as pb
 from server.commands import parse_command, KNOWN_LABELS, LABEL_ALIASES, CommandInput
+from server.dashboard import Dashboard
 
 
 
@@ -204,7 +205,7 @@ def _mask_fingerprint(resp) -> str:
 
 
 async def run_client(url: str, target_fps: int, camera: int,
-                     whisper_enabled: bool = False):
+                     whisper_enabled: bool = False, show_dashboard: bool = False):
     # Check protobuf backend
     try:
         from google.protobuf.internal import api_implementation
@@ -246,8 +247,11 @@ async def run_client(url: str, target_fps: int, camera: int,
             ping_timeout=60,
         ) as ws:
             print(f"Connected! Target {target_fps} fps. Ctrl+C to quit.")
-            print("  Display is on the SERVER window.")
-            print("Commands (type in console):")
+            if show_dashboard:
+                print("  Dashboard: LOCAL window")
+            else:
+                print("  Display is on the SERVER window.")
+            print("Commands (type in console or dashboard):")
             print("  blur <object>  — blur person, face, wall, monitor, etc.")
             print("  unblur <object> — stop blurring that object")
             print("  clear          — remove all blur effects")
@@ -264,6 +268,21 @@ async def run_client(url: str, target_fps: int, camera: int,
 
             # --- Blur state (sent to server, local tracking for console feedback) ---
             blur_targets: set[str] = set()
+
+            # --- Dashboard (local display when --show) ---
+            dashboard = None
+            pending_commands: list[str] = []
+
+            def on_dashboard_command(cmd: str):
+                pending_commands.append(cmd)
+
+            if show_dashboard:
+                dashboard = Dashboard(
+                    window_name="SocialSenseAR Client",
+                    on_command=on_dashboard_command,
+                    get_active_prompts=lambda: blur_targets,
+                    get_effects=lambda: {t: {"type": "blur"} for t in blur_targets},
+                )
 
             # --- Shared state ---
             send_count = 0
@@ -352,10 +371,29 @@ async def run_client(url: str, target_fps: int, camera: int,
                     await ws.send(data)
                     send_count += 1
 
-                    # --- Process console + whisper commands ---
+                    # --- Update dashboard if enabled (show webcam even before server responds) ---
+                    if dashboard:
+                        display_frame, _ = grabber.get()
+                        if display_frame is not None:
+                            # No flip needed - webcam is already right-side up for display
+                            # Use segments from response if available, otherwise empty
+                            segments = list(latest_resp.segments) if latest_resp else []
+                            # Extract voice agent state if present
+                            va_state = None
+                            if latest_resp and (latest_resp.conversation.voice_agent.listening or latest_resp.conversation.voice_agent.recording):
+                                va_state = {
+                                    'listening': latest_resp.conversation.voice_agent.listening,
+                                    'recording': latest_resp.conversation.voice_agent.recording,
+                                    'last_response': latest_resp.conversation.voice_agent.last_response,
+                                }
+                            dashboard.update(display_frame, segments, va_state)
+
+                    # --- Process console + whisper + dashboard commands ---
                     all_cmds = cmd_input.get_commands()
                     if whisper_input and whisper_input.available:
                         all_cmds.extend(whisper_input.get_commands())
+                    all_cmds.extend(pending_commands)
+                    pending_commands.clear()
                     for raw_cmd in all_cmds:
                         action, target = parse_command(raw_cmd)
                         if action == "blur" and target:
@@ -420,6 +458,8 @@ async def run_client(url: str, target_fps: int, camera: int,
                 cmd_input.stop()
                 if whisper_input:
                     whisper_input.stop()
+                if dashboard:
+                    dashboard.close()
 
     except (ConnectionRefusedError, OSError) as e:
         print(f"ERROR: Cannot connect to {url} ({e})")
@@ -437,8 +477,17 @@ def main():
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
     parser.add_argument("--whisper", action="store_true",
                         help="Enable voice commands via Whisper (requires openai-whisper + sounddevice)")
+    parser.add_argument("--show", action="store_true",
+                        help="Show local dashboard (required for remote servers like Modal)")
     args = parser.parse_args()
-    asyncio.run(run_client(args.url, args.fps, args.camera, args.whisper))
+
+    # Auto-enable --show for remote (non-localhost) URLs
+    show = args.show
+    if not show and "localhost" not in args.url and "127.0.0.1" not in args.url:
+        print("Remote URL detected, enabling local dashboard (--show)")
+        show = True
+
+    asyncio.run(run_client(args.url, args.fps, args.camera, args.whisper, show))
 
 
 if __name__ == "__main__":

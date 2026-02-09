@@ -131,6 +131,11 @@ class PipelineOrchestrator:
         # Conversation state (populated by audio pipeline)
         self._conversation_state: dict = {}
 
+        # --- Effect registry (works without voice agent) ---
+        # Maps label -> {"type": "blur", "intensity": 1.0}
+        self._effect_registry: dict[str, dict] = {}
+        self._effect_lock = threading.Lock()
+
         self._frame_count = 0
         self._initialized = False
 
@@ -239,6 +244,37 @@ class PipelineOrchestrator:
             # Clear cached result so next frame builds fresh segments
             self._cached_result = None
             logger.info(f"Cleared {len(to_remove)} tracks for removed prompts: {labels}")
+
+    # ------------------------------------------------------------------
+    # Effect registry (typed commands: blur/unblur)
+    # ------------------------------------------------------------------
+
+    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0):
+        """Apply an effect to a label (e.g., blur laptop)."""
+        with self._effect_lock:
+            self._effect_registry[label] = {
+                "type": effect_type,
+                "intensity": min(1.0, max(0.0, intensity)),
+            }
+        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f})")
+
+    def remove_effect(self, label: str):
+        """Remove effect from a label."""
+        with self._effect_lock:
+            if label in self._effect_registry:
+                del self._effect_registry[label]
+                logger.info(f"Effect removed: {label}")
+
+    def clear_effects(self):
+        """Clear all effects."""
+        with self._effect_lock:
+            self._effect_registry.clear()
+        logger.info("All effects cleared")
+
+    def get_effects(self) -> dict[str, dict]:
+        """Get copy of active effects."""
+        with self._effect_lock:
+            return self._effect_registry.copy()
 
     # ------------------------------------------------------------------
     # Frame processing — pre-decodes JPEG, returns cached result
@@ -414,8 +450,8 @@ class PipelineOrchestrator:
                 self._update_tracks(new_segments, now, fh, fw)
                 tracked = self._get_tracked_output(now, fh, fw)
 
-                # 5. Apply voice agent effects to tracked segments
-                self._apply_voice_effects(tracked)
+                # 5. Apply effects (typed commands + voice agent) to tracked segments
+                self._apply_effects(tracked)
 
                 # 6. Sync voice agent known objects with SAM3 (register segments as known)
                 if self._voice_agent is not None and self.config.pipeline_mode == "sam3":
@@ -740,19 +776,27 @@ class PipelineOrchestrator:
     # Voice Agent Effects Application
     # ------------------------------------------------------------------
 
-    def _apply_voice_effects(self, segments: list):
-        """Apply voice agent effects to tracked segments.
+    def _apply_effects(self, segments: list):
+        """Apply effects to tracked segments.
 
-        Sets EffectData on each segment based on voice agent's active effects registry.
+        Combines effects from:
+        1. Effect registry (typed commands: blur/unblur)
+        2. Voice agent (if enabled)
+
+        Sets EffectData on each segment.
         """
-        if self._voice_agent is None:
-            return
+        from server.vision.segment_data import EffectData
 
-        active_effects = self._voice_agent.get_active_effects()
+        # Merge effect sources: registry + voice agent
+        active_effects = self.get_effects()  # from typed commands
+
+        # Voice agent effects override/extend typed commands
+        if self._voice_agent is not None:
+            voice_effects = self._voice_agent.get_active_effects()
+            active_effects.update(voice_effects)
+
         if not active_effects:
             return
-
-        from server.vision.segment_data import EffectData
 
         for seg in segments:
             if seg.label and seg.label in active_effects:

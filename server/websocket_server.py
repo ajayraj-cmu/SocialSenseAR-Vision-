@@ -300,6 +300,15 @@ class SocialSenseServer:
             if mask.shape[:2] != (fh, fw):
                 mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_LINEAR)
             mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
+
+            # Apply visual effect if present
+            effect_type = seg.effect.effect_type if seg.HasField("effect") else ""
+            if effect_type == "blur":
+                # Blur the region under the mask
+                mask_bool = mask_u8 > 128
+                blurred = cv2.GaussianBlur(frame, (51, 51), 0)
+                frame[mask_bool] = blurred[mask_bool]
+
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 continue
@@ -307,6 +316,9 @@ class SocialSenseServer:
             cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)
             cv2.drawContours(frame, contours, -1, color, 2)
             label = seg.label or seg.asset_class or ""
+            # Show effect type in label
+            if effect_type and effect_type != "none":
+                label = f"{label} [{effect_type}]"
             if label:
                 cx = int(seg.center_x * fw)
                 cy = int(seg.center_y * fh)
@@ -338,11 +350,15 @@ class SocialSenseServer:
         y += 18
 
         active = set()
+        effects = {}
         if self.pipeline is not None:
             active = self.pipeline.get_active_prompts()
+            effects = self.pipeline.get_effects()
         if active:
             for p in sorted(active):
-                cv2.putText(panel, f"> {p}", (12, y), font, 0.4, self._ACTIVE_COLOR, 1, cv2.LINE_AA)
+                fx = effects.get(p, {}).get("type", "")
+                fx_str = f" [{fx}]" if fx else ""
+                cv2.putText(panel, f"> {p}{fx_str}", (12, y), font, 0.4, self._ACTIVE_COLOR, 1, cv2.LINE_AA)
                 y += 18
         else:
             cv2.putText(panel, "(none)", (12, y), font, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
@@ -507,13 +523,15 @@ class SocialSenseServer:
         action, target = parse_command(raw_cmd)
 
         if action == "blur" and target:
-            self.pipeline.add_prompt(target)
-            self._input_log.append(f"+ {target}")
+            self.pipeline.add_prompt(target)  # Tell SAM to segment it
+            self.pipeline.set_effect(target, "blur", 1.0)  # Apply blur effect
+            self._input_log.append(f"blur {target}")
         elif action == "unblur" and target:
-            self.pipeline.remove_prompt(target)
-            self._input_log.append(f"- {target}")
+            self.pipeline.remove_effect(target)  # Remove effect (keep segmenting)
+            self._input_log.append(f"unblur {target}")
         elif action == "clear":
             self.pipeline.set_active_prompts(set())
+            self.pipeline.clear_effects()
             self._input_log.append("cleared all")
         elif action == "list":
             active = self.pipeline.get_active_prompts()
@@ -570,13 +588,16 @@ class SocialSenseServer:
 
         if action == "blur" and target:
             self.pipeline.add_prompt(target)
+            self.pipeline.set_effect(target, "blur", 1.0)
         elif action == "unblur" and target:
-            self.pipeline.remove_prompt(target)
+            self.pipeline.remove_effect(target)
         elif action == "clear":
             self.pipeline.set_active_prompts(set())
+            self.pipeline.clear_effects()
         elif action == "list":
             active = self.pipeline.get_active_prompts()
-            logger.info(f"Active prompts: {sorted(active)}")
+            effects = self.pipeline.get_effects()
+            logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
 
     async def _console_command_loop(self):
         """Read commands from server console — fallback when cv2 window not focused."""
@@ -592,14 +613,17 @@ class SocialSenseServer:
                     action, target = parse_command(raw_cmd)
                     if action == "blur" and target:
                         self.pipeline.add_prompt(target)
+                        self.pipeline.set_effect(target, "blur", 1.0)
                     elif action == "unblur" and target:
-                        self.pipeline.remove_prompt(target)
+                        self.pipeline.remove_effect(target)
                     elif action == "clear":
                         self.pipeline.set_active_prompts(set())
-                        logger.info("Cleared all active prompts")
+                        self.pipeline.clear_effects()
+                        logger.info("Cleared all prompts and effects")
                     elif action == "list":
                         active = self.pipeline.get_active_prompts()
-                        logger.info(f"Active prompts: {sorted(active)}")
+                        effects = self.pipeline.get_effects()
+                        logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
                     elif action == "help":
                         logger.info(f"Labels: {', '.join(sorted(KNOWN_LABELS))}")
                         logger.info(f"Aliases: {', '.join(f'{k}->{v}' for k, v in sorted(LABEL_ALIASES.items()))}")
