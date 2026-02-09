@@ -137,11 +137,15 @@ class SocialSenseServer:
             msg.frame_id,
         )
 
+        # Check if effects were explicitly cleared — must check BEFORE cache
+        # so Unity gets the flag even when segments are unchanged
+        effects_cleared = self.pipeline.consume_effects_cleared()
+
         # Check if segments changed (by object identity — pipeline creates new
         # list only when SAM produces new data)
         seg_id = id(result.segments)
-        if seg_id == self._cached_segments_id and self._cached_response_bytes:
-            # Segments unchanged — reuse cached serialized bytes
+        if seg_id == self._cached_segments_id and self._cached_response_bytes and not effects_cleared:
+            # Segments unchanged and no clear command — reuse cached serialized bytes
             wall_ms = (time.perf_counter() - t_wall) * 1000
             if self._frame_count % 120 == 0:
                 elapsed = time.time() - self._start_time
@@ -165,8 +169,10 @@ class SocialSenseServer:
         response.masks_updated = not getattr(result, 'decoder_skipped', True)
         response.timestamp_ms = time.time() * 1000
 
-        # Check if effects were explicitly cleared (for Unity to reset persistent blur)
-        response.effects_cleared = self.pipeline.consume_effects_cleared()
+        # Set effects_cleared flag (already consumed above, before cache check)
+        response.effects_cleared = effects_cleared
+        if effects_cleared:
+            logger.info("Sending effects_cleared=True to Unity")
 
         for seg in result.segments:
             proto_seg = response.segments.add()
