@@ -140,6 +140,8 @@ class SocialSenseServer:
         # Check if effects were explicitly cleared — must check BEFORE cache
         # so Unity gets the flag even when segments are unchanged
         effects_cleared = self.pipeline.consume_effects_cleared()
+        if effects_cleared:
+            logger.info("effects_cleared=True detected, will skip cache and send to Unity")
 
         # Check if segments changed (by object identity — pipeline creates new
         # list only when SAM produces new data)
