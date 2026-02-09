@@ -85,8 +85,8 @@ class PipelineOrchestrator:
             if backend == "local":
                 from server.audio.local_transcriber import LocalTranscriber
                 self._transcriber = LocalTranscriber(
-                    listening_model=getattr(config, 'whisper_listening_model', 'tiny.en'),
-                    recording_model=getattr(config, 'whisper_recording_model', 'base.en'),
+                    listening_model=getattr(config, 'whisper_listening_model', 'medium.en'),
+                    recording_model=getattr(config, 'whisper_recording_model', 'medium.en'),
                 )
                 logger.info("Transcriber: local (faster-whisper)")
             else:

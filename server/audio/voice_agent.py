@@ -223,10 +223,11 @@ class VoiceCommandPlanner:
     )
     _FILLER = {'the', 'a', 'an', 'my', 'that', 'this'}
     _SELF_WORDS = {'me', 'myself', 'us'}
+    _NOT_TARGETS = {'everything', 'every', 'all', 'anything'}  # incomplete phrases, not real objects
 
     _RE_CLEAR = re.compile(r'^(?:clear|reset|stop|off)$', re.IGNORECASE)
     _RE_EFFECT_INVERT = re.compile(
-        rf'^({_EFFECTS})\s+(?:everything|all)\s+(?:but|except)\s+(.+)$', re.IGNORECASE,
+        rf'^({_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except)\s+(.+)$', re.IGNORECASE,
     )
     _RE_EFFECT_TARGET = re.compile(
         rf'^({_EFFECTS})\s+(.+)$', re.IGNORECASE,
@@ -253,8 +254,10 @@ class VoiceCommandPlanner:
 
         words = raw.split()
 
-        # Single word → use directly
+        # Single word → use directly (unless it's an incomplete phrase word)
         if len(words) == 1:
+            if words[0] in self._NOT_TARGETS:
+                return None  # "every", "everything" etc — incomplete, need more input
             return words[0]
 
         # Try stripping obvious fillers
@@ -718,23 +721,32 @@ class VoiceAgent:
 
             logger.info(f"Wake word detected! remainder: \"{remainder}\"")
 
-            # Single-pass: if remainder has enough words, execute immediately
-            # e.g. "vibe blur the laptop" → remainder is "blur the laptop"
+            # "vibe everything but X" → user means "blur everything but X"
+            # The wake word consumed "vibe" but it also implied the default effect
+            if remainder and re.match(r'(?:every\s*thing|everything|all)\s+(?:but|except)\s', remainder, re.IGNORECASE):
+                remainder = f"blur {remainder}"
+                logger.info(f"Injected default effect: \"{remainder}\"")
+
+            # Single-pass: execute immediately ONLY if fast-path is confident
+            # e.g. "vibe blur the laptop" → remainder "blur laptop" → fast-path matches
+            # but "vibe dim every" → fast-path returns None → record more input
             if remainder and len(remainder.split()) >= 2:
-                logger.info(f"Single-pass command: \"{remainder}\"")
-                self._conversation_state.update({
-                    "listening": False,
-                    "recording": True,
-                    "partial_transcript": remainder,
-                    "last_response": "Processing...",
-                })
-                self._execute_command(remainder)
-                self._conversation_state.update({
-                    "listening": True,
-                    "recording": False,
-                    "partial_transcript": "",
-                })
-                return
+                fast = self._planner._try_fast_parse(remainder)
+                if fast:
+                    logger.info(f"Single-pass command: \"{remainder}\"")
+                    self._conversation_state.update({
+                        "listening": False,
+                        "recording": True,
+                        "partial_transcript": remainder,
+                        "last_response": "Processing...",
+                    })
+                    self._execute_command(remainder)
+                    self._conversation_state.update({
+                        "listening": True,
+                        "recording": False,
+                        "partial_transcript": "",
+                    })
+                    return
 
             # Otherwise start recording for more input
             self._assembler.start(initial_text=remainder)
