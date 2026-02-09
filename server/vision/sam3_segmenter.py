@@ -341,9 +341,9 @@ class SAM3Segmenter:
         if meta_path:
             logger.info(f"    Meta: {os.path.basename(meta_path)}")
 
-        topk_path = _find_engine("sam3_topk_decoder")
         full_path = _find_engine("sam3_decoder")
-        dec_engine_path = topk_path or full_path
+        topk_path = _find_engine("sam3_topk_decoder")
+        dec_engine_path = full_path or topk_path  # Prefer full decoder (multi-instance masks)
         self._trt_decoder_available = dec_engine_path is not None
 
         # Init PyTorch (skips torch.compile + warmup for components with TRT replacements)
@@ -1655,13 +1655,17 @@ class SAM3Segmenter:
     # ------------------------------------------------------------------
 
     def _extract_masks_gpu(self, outputs, prompts: list[str], h: int, w: int) -> dict[str, np.ndarray | None]:
-        """Extract best mask per prompt entirely on GPU. Avoids HF postprocess + massive CPU transfer.
+        """Extract and merge multi-instance masks per prompt on GPU.
 
-        Instead of transferring (B, 200, 1008, 1008) float to CPU, we:
-        1. Score queries on GPU: final_score = pred_logits.sigmoid() * presence_logits.sigmoid()
-        2. Pick best query per batch element (argmax)
-        3. Threshold that single mask on GPU
-        4. Resize to (h, w) on GPU
+        For each prompt, merges ALL query masks above the confidence threshold
+        (not just argmax). This handles multiple instances of the same object
+        (e.g. 3 people → 3 query masks merged into one union mask).
+
+        Pipeline (all GPU):
+        1. Score queries: final_score = pred_logits.sigmoid() * presence_logits.sigmoid()
+        2. For each prompt, find all queries above threshold
+        3. Union their masks (logical OR)
+        4. Resize to (h, w)
         5. Transfer only (B, h, w) uint8 to CPU
         """
         torch = self._torch
@@ -1679,25 +1683,28 @@ class SAM3Segmenter:
         if presence is not None:
             scores = scores * presence.sigmoid()  # broadcast (B, 1)
 
-        # Best query per batch element
-        best_idx = scores.argmax(dim=1)       # (B,)
-        best_score = scores.gather(1, best_idx.unsqueeze(1)).squeeze(1)  # (B,)
-
         result = {}
         for i, prompt in enumerate(prompts):
-            self._score_cache[prompt] = best_score[i].item()
-            if best_score[i].item() < self._confidence_threshold:
+            query_scores = scores[i]  # (200,)
+            passing = query_scores > self._confidence_threshold  # (200,) bool
+            n_passing = passing.sum().item()
+
+            if n_passing == 0:
+                self._score_cache[prompt] = query_scores.max().item()
                 result[prompt] = None
                 continue
 
-            # Extract single mask: (Hm, Wm)
-            mask_logits = pred_masks[i, best_idx[i]]
-            mask_bool = (mask_logits > 0.0)  # sigmoid threshold at 0.5 = logit > 0
+            # Report best score for dashboard
+            best_score = query_scores[passing].max().item()
+            self._score_cache[prompt] = best_score
+
+            # Merge all passing query masks (union)
+            passing_masks = pred_masks[i, passing]  # (K, Hm, Wm)
+            merged = (passing_masks > 0.0).any(dim=0).to(torch.uint8)  # (Hm, Wm)
 
             # Resize to target (h, w) using nearest (fast)
-            mask_u8_gpu = mask_bool.to(torch.uint8).unsqueeze(0).unsqueeze(0)  # (1,1,Hm,Wm)
             mask_resized = torch.nn.functional.interpolate(
-                mask_u8_gpu.float(), size=(h, w), mode='nearest'
+                merged.unsqueeze(0).unsqueeze(0).float(), size=(h, w), mode='nearest'
             ).squeeze().to(torch.uint8) * 255  # (h, w)
 
             mask_u8 = mask_resized.cpu().numpy()
@@ -1705,6 +1712,9 @@ class SAM3Segmenter:
                 result[prompt] = None
             else:
                 result[prompt] = mask_u8
+
+            if n_passing > 1 and (self._frame_count <= 10 or self._frame_count % 120 == 0):
+                _dbg(f"Multi-instance: '{prompt}' merged {n_passing} queries (best={best_score:.3f})")
 
         return result
 

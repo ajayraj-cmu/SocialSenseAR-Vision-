@@ -230,7 +230,7 @@ class VoiceCommandPlanner:
 
     _RE_CLEAR = re.compile(r'^(?:clear|reset|stop|off)$', re.IGNORECASE)
     _RE_EFFECT_INVERT = re.compile(
-        rf'^({_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except)\s+(.+)$', re.IGNORECASE,
+        rf'^({_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except|nothing\s+but)\s+(.+)$', re.IGNORECASE,
     )
     _RE_EFFECT_TARGET = re.compile(
         rf'^({_EFFECTS})\s+(.+)$', re.IGNORECASE,
@@ -290,7 +290,8 @@ class VoiceCommandPlanner:
 
     def _try_fast_parse(self, utterance: str) -> Optional[CommandPlan]:
         """Regex fast-path for obvious commands. Returns None if not confident."""
-        text = utterance.strip()
+        # Strip Whisper punctuation (periods, commas, exclamation marks)
+        text = re.sub(r'[.,!?;:]+', '', utterance).strip()
 
         # Pattern 1: clear/reset/stop/off
         if self._RE_CLEAR.match(text):
@@ -785,6 +786,12 @@ class VoiceAgent:
 
     def _execute_command(self, utterance: str):
         """Execute command: Gemini plan → update state → apply effects."""
+        # Normalize Whisper artifacts: strip punctuation, collapse whitespace
+        utterance = re.sub(r'[.,!?;:]+', ' ', utterance).strip()
+        utterance = re.sub(r'\s+', ' ', utterance)
+        # "nothing but" / "not but" → "but" (Whisper splits "everything but" across sentences)
+        utterance = re.sub(r'\bnothing\s+but\b', 'but', utterance, flags=re.IGNORECASE)
+
         t0 = time.time()
 
         # Get current state

@@ -30,8 +30,6 @@ except ImportError:
         TORCH_VERSION = "2.5.1"
         TORCHVISION_VERSION = "0.20.1"
         CUDA_VERSION = "cu121"
-        SAM3_MODEL = "facebook/sam3"
-        SAM3_RESOLUTION = 1008
         TRT_ENGINE_DIR = "/cache/trt_engines"
         TRT_ENABLED = True
 
@@ -107,7 +105,8 @@ def build_trt_engines(decoder_only: bool = False):
 
     Builds:
     - sam3_vision_<res>.engine (vision encoder, ~10 min build)
-    - sam3_topk_decoder_<res>.engine (top-1 decoder, ~5 min build)
+    - sam3_decoder_<res>.engine (full decoder, 200 queries — multi-instance)
+    - sam3_topk_decoder_<res>.engine (top-k decoder, 1 query — faster fallback)
     - sam3_meta_<res>.json (metadata for runtime)
 
     All saved to volume at TRT_ENGINE_DIR.
@@ -124,7 +123,9 @@ def build_trt_engines(decoder_only: bool = False):
     )
     logger = logging.getLogger("trt_builder")
 
-    resolution = config.SAM3_RESOLUTION
+    from server.config import ServerConfig
+    server_config = ServerConfig()
+    resolution = server_config.sam3_resolution
     trt_dir = getattr(config, "TRT_ENGINE_DIR", "/cache/trt_engines")
     os.makedirs(trt_dir, exist_ok=True)
 
@@ -140,16 +141,17 @@ def build_trt_engines(decoder_only: bool = False):
     # ── Step 1: Load SAM3 model ─────────────────────────────────────
     from transformers import Sam3Model, Sam3Processor, Sam3Config
 
+    sam3_model = server_config.sam3_model
     logger.info("Loading SAM3 model and processor...")
     t0 = time.perf_counter()
-    processor = Sam3Processor.from_pretrained(config.SAM3_MODEL)
+    processor = Sam3Processor.from_pretrained(sam3_model)
 
     if resolution != 1008:
-        sam3_config = Sam3Config.from_pretrained(config.SAM3_MODEL)
+        sam3_config = Sam3Config.from_pretrained(sam3_model)
         sam3_config.vision_config.image_size = resolution
-        model = Sam3Model.from_pretrained(config.SAM3_MODEL, config=sam3_config)
+        model = Sam3Model.from_pretrained(sam3_model, config=sam3_config)
     else:
-        model = Sam3Model.from_pretrained(config.SAM3_MODEL)
+        model = Sam3Model.from_pretrained(sam3_model)
 
     device = "cuda"
     model.to(device).eval().half()
@@ -211,16 +213,27 @@ def build_trt_engines(decoder_only: bool = False):
     sys.path.insert(0, "/root/scripts")
     from build_trt_engine import build_engine
 
-    # Build decoder engine (the main bottleneck — 147ms → 3-8ms)
-    decoder_engine = os.path.join(trt_dir, f"sam3_topk_decoder_{resolution}.engine")
+    # Build full decoder engine (200 queries — supports multi-instance masks)
+    full_decoder_engine = os.path.join(trt_dir, f"sam3_decoder_{resolution}.engine")
     logger.info("")
     logger.info("=" * 70)
-    logger.info("Building TRT decoder engine (FP16)...")
+    logger.info("Building TRT full decoder engine (FP16, multi-instance)...")
     logger.info("=" * 70)
     t0 = time.perf_counter()
-    build_engine(topk_onnx, decoder_engine)
+    build_engine(dec_onnx, full_decoder_engine)
     dec_build_s = time.perf_counter() - t0
-    logger.info(f"Decoder engine built in {dec_build_s:.0f}s")
+    logger.info(f"Full decoder engine built in {dec_build_s:.0f}s")
+
+    # Build top-k decoder engine (1 query — faster but single-instance only)
+    topk_decoder_engine = os.path.join(trt_dir, f"sam3_topk_decoder_{resolution}.engine")
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("Building TRT top-k decoder engine (FP16, single-instance)...")
+    logger.info("=" * 70)
+    t0 = time.perf_counter()
+    build_engine(topk_onnx, topk_decoder_engine)
+    topk_build_s = time.perf_counter() - t0
+    logger.info(f"Top-k decoder engine built in {topk_build_s:.0f}s")
 
     # Build vision encoder engine (195ms → 15-25ms)
     if not decoder_only:
