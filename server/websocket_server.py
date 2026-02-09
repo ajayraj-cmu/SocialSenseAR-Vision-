@@ -105,6 +105,10 @@ class SocialSenseServer:
 
         payload_type = msg.WhichOneof("payload")
 
+        # Debug: log every 100th message or all non-frame messages
+        if self._frame_count % 100 == 0 or payload_type != "frame":
+            logger.info(f"[MSG] type={payload_type} size={len(raw_message)}B frame_id={msg.frame_id}")
+
         if payload_type == "frame":
             response_bytes = self._process_frame_fast(msg, t_wall)
             await websocket.send(response_bytes)
@@ -114,6 +118,9 @@ class SocialSenseServer:
 
         elif payload_type == "control":
             self._handle_control(msg)
+
+        else:
+            logger.warning(f"[MSG] Unknown payload type: {payload_type}")
 
     def _process_frame_fast(self, msg: pb.ClientMessage, t_wall: float) -> bytes:
         """Process frame and return serialized protobuf bytes.
@@ -537,6 +544,7 @@ class SocialSenseServer:
 
     def _process_audio(self, msg: pb.ClientMessage):
         """Feed audio data to the audio pipeline."""
+        logger.info(f"[AUDIO] Received {msg.audio.num_samples} samples @ {msg.audio.sample_rate}Hz ({len(msg.audio.pcm16_data)} bytes)")
         if self.pipeline is not None and hasattr(self.pipeline, "process_audio"):
             self.pipeline.process_audio(
                 msg.audio.pcm16_data,
