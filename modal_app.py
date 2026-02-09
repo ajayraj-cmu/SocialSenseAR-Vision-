@@ -48,6 +48,9 @@ except ImportError:
         DEBUG_VIEW = False
         METRICS_LOG_PATH = None
         GEMINI_MODEL = "gemini-2.5-flash"
+        TRANSCRIBER_BACKEND = "local"
+        WHISPER_LISTENING_MODEL = "tiny.en"
+        WHISPER_RECORDING_MODEL = "base.en"
         CACHE_MOUNT_PATH = "/cache"
 
         @staticmethod
@@ -103,6 +106,7 @@ image = (
         "Pillow>=10.0.0",
         "scikit-learn>=1.5.0",
         "google-genai>=1.0.0",
+        "faster-whisper>=1.0.0",
         "openai>=1.0.0",
         "webrtcvad>=2.0.10",
         "mediapipe>=0.10.0",
@@ -195,7 +199,8 @@ class SocialSenseGPU:
             from modal_config import (
                 SAM3_MODEL, SAM3_RESOLUTION, SAM3_PROMPTS_PER_FRAME,
                 SAM3_CACHE_TTL, SAM3_CONFIDENCE_THRESHOLD,
-                AUDIO_ENABLED, DEBUG_VIEW, METRICS_LOG_PATH, GEMINI_MODEL
+                AUDIO_ENABLED, DEBUG_VIEW, METRICS_LOG_PATH, GEMINI_MODEL,
+                TRANSCRIBER_BACKEND, WHISPER_LISTENING_MODEL, WHISPER_RECORDING_MODEL,
             )
         except ImportError:
             SAM3_MODEL = "facebook/sam3"
@@ -207,6 +212,9 @@ class SocialSenseGPU:
             DEBUG_VIEW = False
             METRICS_LOG_PATH = None
             GEMINI_MODEL = "gemini-2.5-flash"
+            TRANSCRIBER_BACKEND = "local"
+            WHISPER_LISTENING_MODEL = "tiny.en"
+            WHISPER_RECORDING_MODEL = "base.en"
 
         self.server_config = ServerConfig(
             device="cuda",
@@ -221,6 +229,9 @@ class SocialSenseGPU:
             debug_view=False,  # Never GUI in Modal
             audio_enabled=AUDIO_ENABLED,
             metrics_log_path=METRICS_LOG_PATH,
+            transcriber_backend=TRANSCRIBER_BACKEND,
+            whisper_listening_model=WHISPER_LISTENING_MODEL,
+            whisper_recording_model=WHISPER_RECORDING_MODEL,
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         )
@@ -386,17 +397,18 @@ class SocialSenseGPU:
 
                         frame_count += 1
 
-                        # Diagnostic: log when masks_frame_id changes (new SAM result)
+                        # Diagnostic: log mask updates only when there are actual segments
                         if response.masks_frame_id != last_masks_fid:
-                            seg_info = [(s.label, f"conf={s.confidence:.3f}", f"rle={len(s.rle_mask)}B")
-                                        for s in response.segments if s.rle_mask]
-                            logger.info(
-                                f"[{remote}] MASK UPDATE: fid={last_masks_fid}->{response.masks_frame_id} "
-                                f"| {len(response.segments)} segs | {seg_info}"
-                            )
                             last_masks_fid = response.masks_frame_id
+                            if response.segments:
+                                seg_info = [(s.label, f"conf={s.confidence:.3f}", f"rle={len(s.rle_mask)}B")
+                                            for s in response.segments if s.rle_mask]
+                                logger.info(
+                                    f"[{remote}] MASK UPDATE: fid={response.masks_frame_id} "
+                                    f"| {len(response.segments)} segs | {seg_info}"
+                                )
 
-                        if frame_count % 60 == 0:
+                        if frame_count % 250 == 0:
                             elapsed = time.time() - t_start
                             fps = frame_count / elapsed if elapsed > 0 else 0
                             logger.info(

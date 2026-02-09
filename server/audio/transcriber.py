@@ -38,7 +38,7 @@ class WhisperTranscriber:
     def available(self) -> bool:
         return self._available
 
-    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000) -> str:
+    def transcribe(self, pcm16_bytes: bytes, sample_rate: int = 16000, mode: str = "listening") -> str:
         """Transcribe PCM16 audio bytes to text.
 
         Args:

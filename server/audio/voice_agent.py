@@ -1,15 +1,16 @@
 """Voice Agent Pipeline — natural language control of SAM3 + effects.
 
 Architecture:
-1. WakeWordGate: Detects "Hey Vibe" to start recording
-2. UtteranceAssembler: Collects speech until "Thank you"
+1. WakeWordGate: Sliding window detection of "vibe" across recent transcripts
+2. UtteranceAssembler: Collects speech until timeout (4s) or "thank you"
 3. VoiceCommandPlanner: Uses Gemini to map intent → structured command plan
 
 Design:
+- Local faster-whisper transcription (no cloud API for wake word detection)
+- 1s chunks during listening (fast), 2s during recording (accurate)
+- Single-pass execution: "vibe blur laptop" executes immediately
 - Audio processing runs asynchronously (does not block frame loop)
 - Commands execute atomically after full utterance is collected
-- Maintains persistent "known objects" registry + active effects state
-- Uses Gemini Vision on-demand for scene understanding
 """
 
 import time
@@ -38,40 +39,56 @@ class CommandPlan:
 
 
 class WakeWordGate:
-    """Detects wake word ("Hey Vibe") in transcript stream.
+    """Sliding window wake word detection.
 
-    Tolerates:
-    - Case variations
-    - Punctuation
-    - Common transcription errors (Hey Vibes, Hey Vive, etc.)
+    Triggers on just "vibe" (single word) across recent transcripts.
+    Sliding window catches wake words split across chunk boundaries.
+    Returns remainder text after wake word for single-pass execution.
     """
 
     WAKE_PATTERNS = [
-        r'\bhey\s+vibe\b',
-        r'\bhey\s+vibes\b',
-        r'\bhey\s+vive\b',
-        r'\bhey\s+five\b',
-        r'\bhey\s+bive\b',
-        r'\bhey\s+vine\b',
-        r'\bhey\s+vise\b',
-        r'\bhey\s+vype\b',
-        r'\bhey\s+bye\b',
-        r'\bhey\s+vi\b',
-        r'\bhey\s+v\w+e\b',  # catch-all: "hey v___e"
+        r'\bhey[\s,]+vibe\b',    # Full phrase (highest priority)
+        r'\bhey[\s,]+vibes\b',
+        r'\bhey[\s,]+bye\b',     # Common Whisper mishearing of "hey vibe"
+        r'\bhey[\s,]+vive\b',
+        r'\bhey[\s,]+five\b',
+        r'\bvibe\b',             # Single word
+        r'\bvibes\b',
+        r'\bvive\b',
+        r'\bvybe\b',
+        r'\bvine\b',
+        r'\bvise\b',
     ]
 
-    def __init__(self):
+    def __init__(self, window_size: int = 3):
         self._patterns = [re.compile(p, re.IGNORECASE) for p in self.WAKE_PATTERNS]
+        self._window: list[str] = []
+        self._window_size = window_size
 
-    def detect(self, text: str) -> bool:
-        """Check if text contains wake word."""
-        return any(pattern.search(text) for pattern in self._patterns)
+    def push_and_check(self, transcript: str) -> tuple[bool, str]:
+        """Add transcript to sliding window, check combined text for wake word.
 
-    def strip_wake_word(self, text: str) -> str:
-        """Remove wake word from beginning of text."""
+        Returns:
+            (detected, remainder_text_after_wake_word)
+        """
+        self._window.append(transcript)
+        if len(self._window) > self._window_size:
+            self._window.pop(0)
+
+        combined = ' '.join(self._window)
+
         for pattern in self._patterns:
-            text = pattern.sub('', text, count=1)
-        return text.strip()
+            match = pattern.search(combined)
+            if match:
+                remainder = combined[match.end():].strip()
+                self._window.clear()
+                return True, remainder
+
+        return False, ""
+
+    def reset(self):
+        """Clear the sliding window."""
+        self._window.clear()
 
 
 class UtteranceAssembler:
@@ -265,13 +282,13 @@ Rules:
 
             plan = CommandPlan(
                 targets=data.get("targets", []),
-                effect_type=data.get("effect_type", "blur"),
-                intensity=float(data.get("intensity", 0.8)),
-                action=data.get("action", "add"),
+                effect_type=data.get("effect_type") or "blur",
+                intensity=float(data.get("intensity") or 0.8),
+                action=data.get("action") or "add",
                 invert=bool(data.get("invert", False)),
                 full_screen_filter=data.get("full_screen_filter"),
-                full_screen_intensity=float(data.get("full_screen_intensity", 0.5)),
-                reasoning=data.get("reasoning", ""),
+                full_screen_intensity=float(data.get("full_screen_intensity") or 0.5),
+                reasoning=data.get("reasoning") or "",
             )
 
             logger.info(f"Gemini plan: {plan.action} {plan.effect_type} → {plan.targets} (invert={plan.invert})")
@@ -381,7 +398,7 @@ class VoiceAgent:
             "recording": False,
             "partial_transcript": "",
             "last_command": "",
-            "last_response": "Ready. Say 'Hey Vibe' to start.",
+            "last_response": "Ready. Say 'Vibe' to start.",
             "last_command_time": 0.0,
         }
 
@@ -429,40 +446,38 @@ class VoiceAgent:
         self._text_thread.start()
         logger.info("VoiceAgent started (audio + text threads)")
 
-    # Minimum RMS energy to bother transcribing (skip silence)
-    _SILENCE_RMS_THRESHOLD = 300  # PCM16 range is -32768..32767, typical speech RMS > 500
+    # Audio pipeline tuning
+    _SILENCE_RMS_THRESHOLD = 150   # Was 300 — lower to catch quiet speech
+    _LISTENING_CHUNK_S = 3.0       # 3s chunks — Whisper needs context for accuracy
+    _RECORDING_CHUNK_S = 3.0       # 3s chunks for accurate command transcription
 
     def ingest_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
         """Called from websocket thread to feed audio data.
 
-        Audio is buffered and processed asynchronously.
-        Uses 2s chunks for fast wake word detection.
+        Buffers audio and emits chunks for background transcription.
+        Uses 1s chunks during listening (fast wake word) and 2s during recording (accurate).
+        No stale chunk dropping — local transcription is cheap.
         """
         with self._buffer_lock:
             self._audio_buffer.extend(pcm16_data)
             self._sample_rate = sample_rate
 
-            # 2-second chunks — fast enough for responsive wake word detection
-            chunk_seconds = 2
-            min_bytes = sample_rate * chunk_seconds * 2  # 2 bytes per PCM16 sample
-            if len(self._audio_buffer) >= min_bytes:
+            # Dynamic chunk size: shorter during listening for fast wake word detection
+            chunk_s = self._RECORDING_CHUNK_S if self._assembler.is_active else self._LISTENING_CHUNK_S
+            min_bytes = int(sample_rate * chunk_s * 2)  # 2 bytes per PCM16 sample
+
+            # Process all complete chunks (no dropping)
+            while len(self._audio_buffer) >= min_bytes:
                 chunk_bytes = bytes(self._audio_buffer[:min_bytes])
                 self._audio_buffer = self._audio_buffer[min_bytes:]
 
-                # Energy gate: skip silence (don't waste Whisper API calls)
+                # Energy gate: skip silence
                 samples = np.frombuffer(chunk_bytes, dtype=np.int16)
                 rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
                 if rms < self._SILENCE_RMS_THRESHOLD:
-                    return  # silence, skip
+                    continue  # silence, skip
 
-                # During listening (pre-wake-word): drop stale chunks, only latest matters.
-                # During recording (post-wake-word): keep all chunks for accurate assembly.
-                if not self._assembler.is_active:
-                    try:
-                        while not self._audio_queue.empty():
-                            self._audio_queue.get_nowait()
-                    except queue.Empty:
-                        pass
+                # No stale chunk dropping — local transcription is fast and free
                 self._audio_queue.put((chunk_bytes, sample_rate))
 
     def update_frame(self, frame_bgr: np.ndarray):
@@ -531,21 +546,55 @@ class VoiceAgent:
                 logger.error(f"Text command loop error: {e}", exc_info=True)
 
     def _handle_transcription(self, audio_bytes: bytes, sample_rate: int):
-        """Transcribe audio chunk and process for wake word / command assembly."""
+        """Transcribe audio chunk and process for wake word / command assembly.
+
+        Uses fast model during listening (wake word detection) and
+        accurate model during recording (command transcription).
+        Supports single-pass execution: "vibe blur laptop" in one breath.
+        """
         if not self._transcriber.available:
             return
 
-        text = self._transcriber.transcribe(audio_bytes, sample_rate)
+        # Choose transcription model based on phase
+        mode = "recording" if self._assembler.is_active else "listening"
+        text = self._transcriber.transcribe(audio_bytes, sample_rate, mode=mode)
         if not text:
             return
 
-        logger.info(f"Transcript: \"{text}\"")
+        _now = time.monotonic()
+        if not hasattr(self, '_last_transcript_log'):
+            self._last_transcript_log = 0.0
+        if mode == "recording" or _now - self._last_transcript_log >= 5.0:
+            logger.info(f"Transcript [{mode}]: \"{text}\"")
+            self._last_transcript_log = _now
 
-        # Check for wake word
-        if not self._assembler.is_active and self._wake_gate.detect(text):
-            # Strip wake word — keep any command text that follows it
-            remainder = self._wake_gate.strip_wake_word(text).strip()
+        # --- LISTENING PHASE: check sliding window for wake word ---
+        if not self._assembler.is_active:
+            detected, remainder = self._wake_gate.push_and_check(text)
+            if not detected:
+                return
+
             logger.info(f"Wake word detected! remainder: \"{remainder}\"")
+
+            # Single-pass: if remainder has enough words, execute immediately
+            # e.g. "vibe blur the laptop" → remainder is "blur the laptop"
+            if remainder and len(remainder.split()) >= 2:
+                logger.info(f"Single-pass command: \"{remainder}\"")
+                self._conversation_state.update({
+                    "listening": False,
+                    "recording": True,
+                    "partial_transcript": remainder,
+                    "last_response": "Processing...",
+                })
+                self._execute_command(remainder)
+                self._conversation_state.update({
+                    "listening": True,
+                    "recording": False,
+                    "partial_transcript": "",
+                })
+                return
+
+            # Otherwise start recording for more input
             self._assembler.start(initial_text=remainder)
             self._conversation_state.update({
                 "listening": False,
@@ -553,33 +602,21 @@ class VoiceAgent:
                 "partial_transcript": remainder,
                 "last_response": "Listening...",
             })
-            # If there's already a command in the same transcript, check if it's complete
-            if remainder:
-                complete = self._assembler.add_chunk("")  # check end phrases in initial text
-                if complete:
-                    logger.info(f"Immediate command: \"{complete}\"")
-                    self._execute_command(complete)
-                    self._conversation_state.update({
-                        "listening": True,
-                        "recording": False,
-                        "partial_transcript": "",
-                    })
             return
 
-        # Assemble utterance (recording phase)
-        if self._assembler.is_active:
-            complete_utterance = self._assembler.add_chunk(text)
+        # --- RECORDING PHASE: assemble utterance ---
+        complete_utterance = self._assembler.add_chunk(text)
 
-            if complete_utterance is not None:
-                logger.info(f"Complete utterance: \"{complete_utterance}\"")
-                self._execute_command(complete_utterance)
-                self._conversation_state.update({
-                    "listening": True,
-                    "recording": False,
-                    "partial_transcript": "",
-                })
-            else:
-                self._conversation_state["partial_transcript"] = self._assembler.get_partial()
+        if complete_utterance is not None:
+            logger.info(f"Complete utterance: \"{complete_utterance}\"")
+            self._execute_command(complete_utterance)
+            self._conversation_state.update({
+                "listening": True,
+                "recording": False,
+                "partial_transcript": "",
+            })
+        else:
+            self._conversation_state["partial_transcript"] = self._assembler.get_partial()
 
     def _execute_command(self, utterance: str):
         """Execute command: Gemini plan → update state → apply effects."""

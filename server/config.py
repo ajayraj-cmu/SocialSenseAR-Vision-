@@ -57,9 +57,15 @@ class ServerConfig:
     emotion_frame_skip: int = 2
     emotion_smoothing_window: int = 4
 
-    # Audio / Whisper
+    # Audio / Voice Agent
     audio_enabled: bool = True
-    whisper_model: str = "whisper-1"
+    transcriber_backend: str = "local"    # "local" (faster-whisper) or "cloud" (OpenAI Whisper API)
+    whisper_model: str = "whisper-1"      # Cloud Whisper model (when backend="cloud")
+    whisper_listening_model: str = "tiny.en"   # Local fast model for wake word detection
+    whisper_recording_model: str = "base.en"   # Local accurate model for command transcription
+    voice_energy_threshold: int = 150     # RMS silence threshold (PCM16)
+    voice_listening_chunk_s: float = 1.0  # Chunk duration during listening phase
+    voice_wake_window: int = 3            # Sliding window size for wake word detection
 
     # OpenAI
     openai_summary_model: str = "gpt-4o-mini"

@@ -71,7 +71,12 @@ SECRET_NAME = "socialsense-secrets"
 # ============================================================
 
 # Enable audio processing (voice agent)
-AUDIO_ENABLED = True  # Server-side voice agent pipeline (wake word + Whisper + Gemini)
+AUDIO_ENABLED = True  # Server-side voice agent pipeline (wake word + local Whisper + Gemini)
+
+# Transcriber: "local" (faster-whisper, recommended) or "cloud" (OpenAI Whisper API)
+TRANSCRIBER_BACKEND = "local"
+WHISPER_LISTENING_MODEL = "tiny.en"    # Fast model for wake word detection
+WHISPER_RECORDING_MODEL = "base.en"    # Accurate model for command transcription
 
 # Enable debug view (OpenCV window) - only works in modal serve
 DEBUG_VIEW = False

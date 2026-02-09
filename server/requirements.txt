@@ -29,7 +29,8 @@ google-genai>=1.0.0
 fer>=22.5.0
 tensorflow>=2.12.0
 
-# Audio
+# Audio / Voice Agent
+faster-whisper>=1.0.0
 openai>=1.0.0
 webrtcvad>=2.0.10
 

@@ -77,14 +77,26 @@ class PipelineOrchestrator:
         # Audio / Voice Agent components
         self._voice_agent = None
         if config.audio_enabled:
-            from server.audio.transcriber import WhisperTranscriber
             from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
             from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
 
-            self._transcriber = WhisperTranscriber(
-                api_key=config.openai_api_key,
-                model=config.whisper_model,
-            )
+            # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
+            backend = getattr(config, 'transcriber_backend', 'local')
+            if backend == "local":
+                from server.audio.local_transcriber import LocalTranscriber
+                self._transcriber = LocalTranscriber(
+                    listening_model=getattr(config, 'whisper_listening_model', 'tiny.en'),
+                    recording_model=getattr(config, 'whisper_recording_model', 'base.en'),
+                )
+                logger.info("Transcriber: local (faster-whisper)")
+            else:
+                from server.audio.transcriber import WhisperTranscriber
+                self._transcriber = WhisperTranscriber(
+                    api_key=config.openai_api_key,
+                    model=config.whisper_model,
+                )
+                logger.info("Transcriber: cloud (OpenAI Whisper)")
+
             self._voice_planner = VoiceCommandPlanner(api_key=config.gemini_api_key)
             self._scene_understanding = GeminiSceneUnderstanding(api_key=config.gemini_api_key)
 
@@ -501,7 +513,7 @@ class PipelineOrchestrator:
                 self._sam_ms_accum += sam_ms
 
                 # Frequent centroid log (every 30 iters ~4s) to diagnose mask movement
-                if self._sam_count % 30 == 0 and self._sam_count > 0:
+                if self._sam_count % 150 == 0 and self._sam_count > 0:
                     centroid_info = [(t.track_id, t.label,
                                       f"cx={t.center_x:.3f}", f"cy={t.center_y:.3f}",
                                       f"rle={len(t.rle_mask) if t.rle_mask else 0}B")
@@ -903,20 +915,35 @@ class PipelineOrchestrator:
         If invert=True, SAM3 segments the targets but the effect applies to
         everything OUTSIDE those masks (e.g., "blur everything but laptop").
         """
+        # Validate targets — filter garbage from bad transcriptions
+        valid_targets = []
+        for t in targets:
+            t = t.strip().lower()
+            if not t or len(t) < 2 or len(t) > 30:
+                continue
+            # Skip targets that are clearly not object names
+            if any(c.isdigit() for c in t):
+                continue
+            valid_targets.append(t)
+
+        if not valid_targets and action in ("add", "change"):
+            logger.warning(f"No valid targets from voice command (raw: {targets}), skipping")
+            return
+
         if action in ("add", "change"):
-            for target in targets:
+            for target in valid_targets:
                 self.add_prompt(target)
                 self.set_effect(target, effect_type, intensity, invert=invert)
             mode = " (inverted)" if invert else ""
-            logger.info(f"Voice → SAM3: add prompts {targets} with {effect_type}@{intensity}{mode}")
+            logger.info(f"Voice → SAM3: add prompts {valid_targets} with {effect_type}@{intensity}{mode}")
         elif action == "remove":
-            if not targets:
+            if not valid_targets:
                 # "clear" command — remove ALL prompts and effects
                 self.set_active_prompts(set())
                 self.clear_effects()
                 logger.info("Voice → SAM3: cleared all prompts and effects")
             else:
-                for target in targets:
+                for target in valid_targets:
                     self.remove_effect(target)
                     self.remove_prompt(target)
-                logger.info(f"Voice → SAM3: removed prompts + effects for {targets}")
+                logger.info(f"Voice → SAM3: removed prompts + effects for {valid_targets}")
