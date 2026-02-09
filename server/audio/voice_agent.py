@@ -727,28 +727,9 @@ class VoiceAgent:
                 remainder = f"blur {remainder}"
                 logger.info(f"Injected default effect: \"{remainder}\"")
 
-            # Single-pass: execute immediately ONLY if fast-path is confident
-            # e.g. "vibe blur the laptop" → remainder "blur laptop" → fast-path matches
-            # but "vibe dim every" → fast-path returns None → record more input
-            if remainder and len(remainder.split()) >= 2:
-                fast = self._planner._try_fast_parse(remainder)
-                if fast:
-                    logger.info(f"Single-pass command: \"{remainder}\"")
-                    self._conversation_state.update({
-                        "listening": False,
-                        "recording": True,
-                        "partial_transcript": remainder,
-                        "last_response": "Processing...",
-                    })
-                    self._execute_command(remainder)
-                    self._conversation_state.update({
-                        "listening": True,
-                        "recording": False,
-                        "partial_transcript": "",
-                    })
-                    return
-
-            # Otherwise start recording for more input
+            # Always record after wake word — never single-pass.
+            # 3s chunks split phrases too unpredictably for instant execution.
+            # The assembler will collect chunks and fire on timeout (4.5s silence).
             self._assembler.start(initial_text=remainder)
             self._conversation_state.update({
                 "listening": False,
