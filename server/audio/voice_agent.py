@@ -104,7 +104,13 @@ class UtteranceAssembler:
         r'\bthank\s+ya\b',
     ]
 
-    def __init__(self, timeout: float = 4.0):
+    # Strip wake word leakage from recording chunks (Whisper re-transcribes from overlap)
+    _WAKE_STRIP = re.compile(
+        r'\b(?:hey\s+)?(?:vibe|vibes|vive|vybe|vine|vise|bye)\b[,\s]*',
+        re.IGNORECASE,
+    )
+
+    def __init__(self, timeout: float = 4.5):
         self._patterns = [re.compile(p, re.IGNORECASE) for p in self.END_PATTERNS]
         self._active = False
         self._chunks: list[str] = []
@@ -123,6 +129,11 @@ class UtteranceAssembler:
     def add_chunk(self, text: str) -> Optional[str]:
         """Add transcript chunk. Returns complete utterance if end phrase detected."""
         if not self._active:
+            return None
+
+        # Strip wake word that Whisper re-transcribes from overlapping audio
+        text = self._WAKE_STRIP.sub('', text).strip()
+        if not text:
             return None
 
         self._chunks.append(text)
@@ -179,7 +190,7 @@ class VoiceCommandPlanner:
     - Full-screen filters ("dim everything")
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash-lite"):
         self._api_key = api_key
         self._model = model
         self._client = None
@@ -205,22 +216,153 @@ class VoiceCommandPlanner:
     def available(self) -> bool:
         return self._available
 
+    # --- Fast-path regex patterns (compiled once) ---
+    _EFFECTS = r'blur|pixelate|dim|highlight|outline'
+    _EFFECTS_GERUND = (
+        r'blur(?:ring)?|pixelat(?:e|ing)|dim(?:ming)?|highlight(?:ing)?|outlin(?:e|ing)'
+    )
+    _FILLER = {'the', 'a', 'an', 'my', 'that', 'this'}
+    _SELF_WORDS = {'me', 'myself', 'us'}
+
+    _RE_CLEAR = re.compile(r'^(?:clear|reset|stop|off)$', re.IGNORECASE)
+    _RE_EFFECT_INVERT = re.compile(
+        rf'^({_EFFECTS})\s+(?:everything|all)\s+(?:but|except)\s+(.+)$', re.IGNORECASE,
+    )
+    _RE_EFFECT_TARGET = re.compile(
+        rf'^({_EFFECTS})\s+(.+)$', re.IGNORECASE,
+    )
+    _RE_REMOVE = re.compile(
+        rf'^(?:stop|remove)\s+({_EFFECTS_GERUND})\s*(?:from\s+)?(.+)$', re.IGNORECASE,
+    )
+    _RE_UN_EFFECT = re.compile(
+        rf'^un({_EFFECTS})\s+(.+)$', re.IGNORECASE,
+    )
+
+    def _extract_target(self, raw: str) -> Optional[str]:
+        """Extract a single confident target from raw text.
+
+        Returns the target noun, or None if we're not confident.
+        """
+        raw = raw.strip().lower()
+        if not raw:
+            return "person"
+
+        # me/myself always → person
+        if raw in self._SELF_WORDS:
+            return "person"
+
+        words = raw.split()
+
+        # Single word → use directly
+        if len(words) == 1:
+            return words[0]
+
+        # Try stripping obvious fillers
+        stripped = [w for w in words if w not in self._FILLER]
+
+        # If exactly one word remains → confident
+        if len(stripped) == 1:
+            return "person" if stripped[0] in self._SELF_WORDS else stripped[0]
+
+        # Still multiple words → not confident, let Gemini handle it
+        return None
+
+    def _normalize_effect(self, raw: str) -> str:
+        """Map gerund/variant forms back to canonical effect name."""
+        raw = raw.lower()
+        if raw.startswith('blur'):
+            return 'blur'
+        if raw.startswith('pixelat'):
+            return 'pixelate'
+        if raw.startswith('dim'):
+            return 'dim'
+        if raw.startswith('highlight'):
+            return 'highlight'
+        if raw.startswith('outlin'):
+            return 'outline'
+        return 'blur'
+
+    def _try_fast_parse(self, utterance: str) -> Optional[CommandPlan]:
+        """Regex fast-path for obvious commands. Returns None if not confident."""
+        text = utterance.strip()
+
+        # Pattern 1: clear/reset/stop/off
+        if self._RE_CLEAR.match(text):
+            return CommandPlan(
+                targets=[], effect_type="blur", intensity=0.0,
+                action="remove", reasoning="fast-path: clear all",
+            )
+
+        # Pattern 3 (check before pattern 2 — more specific):
+        # "<effect> everything/all but/except <target>"
+        m = self._RE_EFFECT_INVERT.match(text)
+        if m:
+            target = self._extract_target(m.group(2))
+            if target is None:
+                return None
+            return CommandPlan(
+                targets=[target], effect_type=m.group(1).lower(),
+                intensity=0.8, action="add", invert=True,
+                reasoning=f"fast-path: {m.group(1)} everything but {target}",
+            )
+
+        # Pattern 4: "stop/remove <effect> <target>" or "un<effect> <target>"
+        m = self._RE_REMOVE.match(text) or self._RE_UN_EFFECT.match(text)
+        if m:
+            target = self._extract_target(m.group(2))
+            if target is None:
+                return None
+            return CommandPlan(
+                targets=[target], effect_type=self._normalize_effect(m.group(1)),
+                intensity=0.0, action="remove",
+                reasoning=f"fast-path: remove {m.group(1)} from {target}",
+            )
+
+        # Pattern 2: "<effect> <target>"
+        m = self._RE_EFFECT_TARGET.match(text)
+        if m:
+            target = self._extract_target(m.group(2))
+            if target is None:
+                return None
+            return CommandPlan(
+                targets=[target], effect_type=m.group(1).lower(),
+                intensity=0.8, action="add",
+                reasoning=f"fast-path: {m.group(1)} {target}",
+            )
+
+        # Pattern 5: bare target (1-2 words, no keywords) → default to blur
+        words = text.lower().split()
+        if len(words) <= 2:
+            target = self._extract_target(text)
+            if target is not None:
+                return CommandPlan(
+                    targets=[target], effect_type="blur",
+                    intensity=0.8, action="add",
+                    reasoning=f"fast-path: bare target → blur {target}",
+                )
+
+        # Not confident → let Gemini handle it
+        return None
+
     def plan_command(
         self,
         utterance: str,
         known_objects: set[str],
         active_effects: dict[str, dict],
     ) -> CommandPlan:
-        """Map natural language utterance to structured command plan via Gemini.
+        """Map natural language utterance to structured command plan.
 
-        Args:
-            utterance: User's command text
-            known_objects: Set of object labels we've seen before
-            active_effects: Current effect state {label: {"type": "blur", "intensity": 0.8}}
-
-        Returns:
-            CommandPlan with targets, effect, action, reasoning
+        Tries regex fast-path first (0ms). Falls back to Gemini for complex commands.
         """
+        # Try fast regex parse first
+        fast = self._try_fast_parse(utterance)
+        if fast:
+            logger.info(
+                f"Fast-path plan: {fast.action} {fast.effect_type} → "
+                f"{fast.targets} (invert={fast.invert})"
+            )
+            return fast
+
         if not self._available:
             logger.warning(f"Gemini unavailable, extracting targets from text: {utterance}")
             return self._emergency_parse(utterance)

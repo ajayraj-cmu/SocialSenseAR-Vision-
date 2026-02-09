@@ -134,6 +134,7 @@ class LocalTranscriber:
                 language="en",
                 beam_size=5,
                 initial_prompt=self.INITIAL_PROMPT,
+                hotwords="vibe blur pixelate dim person laptop phone screen clear",
                 vad_filter=False,  # We have our own energy gate — don't let VAD discard speech
             )
 
