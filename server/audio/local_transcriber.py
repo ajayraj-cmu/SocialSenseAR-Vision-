@@ -20,10 +20,13 @@ class LocalTranscriber:
     and an accurate one for recording (command transcription).
     """
 
+    # Vocabulary hint so Whisper biases toward our domain words
+    INITIAL_PROMPT = "vibe blur pixelate dim person laptop phone screen"
+
     def __init__(
         self,
-        listening_model: str = "tiny.en",
-        recording_model: str = "base.en",
+        listening_model: str = "medium.en",
+        recording_model: str = "medium.en",
         device: str = "auto",
     ):
         self._listening_model_name = listening_model
@@ -129,7 +132,8 @@ class LocalTranscriber:
             segments, info = model.transcribe(
                 samples,
                 language="en",
-                beam_size=1,  # Greedy decoding for speed
+                beam_size=5,
+                initial_prompt=self.INITIAL_PROMPT,
                 vad_filter=False,  # We have our own energy gate — don't let VAD discard speech
             )
 

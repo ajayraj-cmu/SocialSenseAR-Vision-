@@ -397,16 +397,21 @@ class SocialSenseGPU:
 
                         frame_count += 1
 
-                        # Diagnostic: log mask updates only when there are actual segments
+                        # Diagnostic: log mask updates at most every 5s
                         if response.masks_frame_id != last_masks_fid:
                             last_masks_fid = response.masks_frame_id
                             if response.segments:
-                                seg_info = [(s.label, f"conf={s.confidence:.3f}", f"rle={len(s.rle_mask)}B")
-                                            for s in response.segments if s.rle_mask]
-                                logger.info(
-                                    f"[{remote}] MASK UPDATE: fid={response.masks_frame_id} "
-                                    f"| {len(response.segments)} segs | {seg_info}"
-                                )
+                                _now_mask = time.time()
+                                if not hasattr(self, '_last_mask_log'):
+                                    self._last_mask_log = 0.0
+                                if _now_mask - self._last_mask_log >= 5.0:
+                                    seg_info = [(s.label, f"conf={s.confidence:.3f}", f"rle={len(s.rle_mask)}B")
+                                                for s in response.segments if s.rle_mask]
+                                    logger.info(
+                                        f"[{remote}] MASK UPDATE: fid={response.masks_frame_id} "
+                                        f"| {len(response.segments)} segs | {seg_info}"
+                                    )
+                                    self._last_mask_log = _now_mask
 
                         if frame_count % 250 == 0:
                             elapsed = time.time() - t_start
