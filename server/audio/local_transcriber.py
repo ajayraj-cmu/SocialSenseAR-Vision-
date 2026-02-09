@@ -1,8 +1,7 @@
 """Local speech-to-text using faster-whisper (CTranslate2).
 
 Zero network latency, zero API cost. Runs Whisper models locally.
-Uses 'tiny.en' for listening phase (fast wake word detection)
-and 'base.en' for recording phase (accurate command transcription).
+Model sizes configured via ServerConfig (whisper_listening_model / whisper_recording_model).
 """
 
 import logging
@@ -20,8 +19,9 @@ class LocalTranscriber:
     and an accurate one for recording (command transcription).
     """
 
-    # Vocabulary hint so Whisper biases toward our domain words
-    INITIAL_PROMPT = "vibe blur pixelate dim person laptop phone screen"
+    # Neither initial_prompt nor hotwords — both cause Whisper to hallucinate
+    # domain vocabulary on quiet audio (e.g. "dim person laptop phone screen").
+    # medium.en + beam_size=5 recognizes these common words fine without hints.
 
     def __init__(
         self,
@@ -135,8 +135,6 @@ class LocalTranscriber:
                 samples,
                 language="en",
                 beam_size=self._beam_size,
-                initial_prompt=self.INITIAL_PROMPT,
-                hotwords="vibe blur pixelate dim person laptop phone screen clear",
                 vad_filter=False,  # We have our own energy gate — don't let VAD discard speech
             )
 

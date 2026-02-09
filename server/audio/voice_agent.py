@@ -743,7 +743,33 @@ class VoiceAgent:
             })
             return
 
-        # --- RECORDING PHASE: assemble utterance ---
+        # --- RECORDING PHASE: check for wake word as command boundary ---
+        # If the user says "vibe" again mid-recording, fire current command and start new one
+        wake_hit, wake_remainder = self._wake_gate.push_and_check(text)
+        if wake_hit:
+            # Fire whatever we've assembled so far
+            current = self._assembler.get_partial()
+            self._assembler.reset()
+            if current.strip():
+                logger.info(f"Wake boundary — firing current: \"{current}\"")
+                self._execute_command(current.strip())
+
+            # Inject default effect for "everything but X" pattern
+            if wake_remainder and re.match(
+                r'(?:every\s*thing|everything|all)\s+(?:but|except)\s',
+                wake_remainder, re.IGNORECASE,
+            ):
+                wake_remainder = f"blur {wake_remainder}"
+
+            # Start assembling the new command
+            self._assembler.start(initial_text=wake_remainder)
+            self._conversation_state.update({
+                "partial_transcript": wake_remainder,
+                "last_response": "Listening...",
+            })
+            return
+
+        # Normal recording: assemble utterance
         complete_utterance = self._assembler.add_chunk(text)
 
         if complete_utterance is not None:
