@@ -74,6 +74,31 @@ class PipelineOrchestrator:
             self._labeler = GeminiLabeler(config)
             logger.info("Pipeline mode: Legacy (FastSAM + MediaPipe + Gemini)")
 
+        # Audio / Voice Agent components
+        self._voice_agent = None
+        if config.audio_enabled:
+            from server.audio.transcriber import WhisperTranscriber
+            from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
+            from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
+
+            self._transcriber = WhisperTranscriber(
+                api_key=config.openai_api_key,
+                model=config.whisper_model,
+            )
+            self._voice_planner = VoiceCommandPlanner(api_key=config.gemini_api_key)
+            self._scene_understanding = GeminiSceneUnderstanding(api_key=config.gemini_api_key)
+
+            self._voice_agent = VoiceAgent(
+                transcriber=self._transcriber,
+                planner=self._voice_planner,
+                scene_understanding=self._scene_understanding,
+                config=config,
+            )
+            self._voice_agent.set_on_command_callback(self._on_voice_command)
+            logger.info("Voice agent pipeline created (will initialize on first frame)")
+        else:
+            logger.info("Audio disabled — voice agent not created")
+
         # --- Continuous SAM thread ---
         # Pre-decoded BGR frame from ws thread (overlaps decode with SAM GPU work)
         self._latest_frame: tuple | None = None  # (frame_bgr, fw, fh, frame_id)
@@ -107,6 +132,11 @@ class PipelineOrchestrator:
         # Conversation state (populated by audio pipeline)
         self._conversation_state: dict = {}
 
+        # --- Effect registry (works without voice agent) ---
+        # Maps label -> {"type": "blur", "intensity": 1.0}
+        self._effect_registry: dict[str, dict] = {}
+        self._effect_lock = threading.Lock()
+
         self._frame_count = 0
         self._initialized = False
 
@@ -138,8 +168,19 @@ class PipelineOrchestrator:
         else:
             t_lbl = t_seg
 
+        # Initialize voice agent components
+        if self._voice_agent is not None:
+            self._transcriber.initialize()
+            self._voice_planner.initialize()
+            self._scene_understanding.initialize()
+            self._voice_agent.start()
+            t_voice = time.perf_counter()
+            logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+        else:
+            t_voice = t_lbl
+
         self._initialized = True
-        logger.info(f"Pipeline ready ({(t_lbl - t0)*1000:.0f}ms)")
+        logger.info(f"Pipeline ready ({(t_voice - t0)*1000:.0f}ms)")
 
     def reset(self):
         self._tracks.clear()
@@ -158,6 +199,11 @@ class PipelineOrchestrator:
         self._segmenter.shutdown()
         if self._labeler is not None:
             self._labeler.shutdown()
+        if self._voice_agent is not None:
+            self._voice_agent.shutdown()
+            self._transcriber.shutdown()
+            self._voice_planner.shutdown()
+            self._scene_understanding.shutdown()
         if self._metrics_log:
             self._metrics_log.close()
             self._metrics_log = None
@@ -196,9 +242,53 @@ class PipelineOrchestrator:
         for tid in to_remove:
             del self._tracks[tid]
         if to_remove:
-            # Clear cached result so next frame builds fresh segments
-            self._cached_result = None
+            # Replace cached result with empty segments instead of setting to None.
+            # Setting to None would trigger _run_sam_sync_decoded + _start_sam_loop
+            # on the next process_frame, spawning a SECOND SAM loop thread that
+            # shares TRT contexts with the first — causing corruption.
+            if self._cached_result is not None:
+                result = PipelineResult()
+                result.masks_frame_id = self._cached_result.masks_frame_id
+                result.decoder_skipped = True
+                self._cached_result = result
             logger.info(f"Cleared {len(to_remove)} tracks for removed prompts: {labels}")
+
+    # ------------------------------------------------------------------
+    # Effect registry (typed commands: blur/unblur)
+    # ------------------------------------------------------------------
+
+    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0, invert: bool = False):
+        """Apply an effect to a label (e.g., blur laptop).
+
+        If invert=True, SAM3 segments the target but the effect applies to
+        everything OUTSIDE the mask (e.g., "blur everything but laptop").
+        """
+        with self._effect_lock:
+            self._effect_registry[label] = {
+                "type": effect_type,
+                "intensity": min(1.0, max(0.0, intensity)),
+                "invert": invert,
+            }
+        mode = " (inverted)" if invert else ""
+        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f}){mode}")
+
+    def remove_effect(self, label: str):
+        """Remove effect from a label."""
+        with self._effect_lock:
+            if label in self._effect_registry:
+                del self._effect_registry[label]
+                logger.info(f"Effect removed: {label}")
+
+    def clear_effects(self):
+        """Clear all effects."""
+        with self._effect_lock:
+            self._effect_registry.clear()
+        logger.info("All effects cleared")
+
+    def get_effects(self) -> dict[str, dict]:
+        """Get copy of active effects."""
+        with self._effect_lock:
+            return self._effect_registry.copy()
 
     # ------------------------------------------------------------------
     # Frame processing — pre-decodes JPEG, returns cached result
@@ -241,8 +331,9 @@ class PipelineOrchestrator:
                 f"Frame {frame_id}: {result.total_ms:.0f}ms (first) | "
                 f"SAM={result.fastsam_ms:.0f}ms | {len(result.segments)} segs"
             )
-            # Start continuous SAM loop
-            self._start_sam_loop()
+            # Start continuous SAM loop (guard against duplicate threads)
+            if self._sam_thread is None or not self._sam_thread.is_alive():
+                self._start_sam_loop()
             return result
 
         # Return cached result (<0.1ms)
@@ -374,10 +465,22 @@ class PipelineOrchestrator:
                 self._update_tracks(new_segments, now, fh, fw)
                 tracked = self._get_tracked_output(now, fh, fw)
 
-                # 6. Encode RLE
+                # 5. Apply effects (typed commands + voice agent) to tracked segments
+                self._apply_effects(tracked)
+
+                # 6. Sync voice agent known objects with SAM3 (register segments as known)
+                if self._voice_agent is not None and self.config.pipeline_mode == "sam3":
+                    for seg in tracked:
+                        if seg.label and not seg.label.startswith("~"):
+                            self._voice_agent.add_known_object(seg.label)
+
+                    # Update voice agent with latest frame for Gemini Vision
+                    self._voice_agent.update_frame(frame_bgr)
+
+                # 7. Encode RLE
                 self._encode_rle_all(tracked, fw, fh)
 
-                # 7. Atomic cache update
+                # 8. Atomic cache update
                 result = PipelineResult()
                 result.segments = tracked
                 result.fastsam_ms = sam_ms
@@ -396,6 +499,18 @@ class PipelineOrchestrator:
                 total_ms = (time.perf_counter() - t0) * 1000
                 self._sam_total_ms_accum += total_ms
                 self._sam_ms_accum += sam_ms
+
+                # Frequent centroid log (every 30 iters ~4s) to diagnose mask movement
+                if self._sam_count % 30 == 0 and self._sam_count > 0:
+                    centroid_info = [(t.track_id, t.label,
+                                      f"cx={t.center_x:.3f}", f"cy={t.center_y:.3f}",
+                                      f"rle={len(t.rle_mask) if t.rle_mask else 0}B")
+                                     for t in tracked]
+                    logger.info(
+                        f"SAM #{self._sam_count} mask-diag: {len(tracked)} segs | "
+                        f"fid={sam_frame_id} | centroids={centroid_info}"
+                    )
+
                 if self._sam_count % 120 == 0 and self._sam_count > 0:
                     avg_total = self._sam_total_ms_accum / 120
                     avg_sam = self._sam_ms_accum / 120
@@ -685,11 +800,123 @@ class PipelineOrchestrator:
         return output
 
     # ------------------------------------------------------------------
-    # Audio pipeline (stub — Phase 4)
+    # Voice Agent Effects Application
+    # ------------------------------------------------------------------
+
+    def _apply_effects(self, segments: list):
+        """Apply effects to tracked segments.
+
+        Combines effects from:
+        1. Effect registry (typed commands: blur/unblur)
+        2. Voice agent (if enabled)
+
+        Sets EffectData on each segment.
+        """
+        from server.vision.segment_data import EffectData
+
+        # Merge effect sources: registry + voice agent
+        active_effects = self.get_effects()  # from typed commands
+
+        # Voice agent effects override/extend typed commands
+        if self._voice_agent is not None:
+            voice_effects = self._voice_agent.get_active_effects()
+            active_effects.update(voice_effects)
+
+        if not active_effects:
+            return
+
+        for seg in segments:
+            if seg.label and seg.label in active_effects:
+                fx = active_effects[seg.label]
+                params = {}
+                if fx.get("invert", False):
+                    params["invert"] = "true"
+                seg.effect = EffectData(
+                    effect_type=fx.get("type", "none"),
+                    intensity=fx.get("intensity", 1.0),
+                    params=params,
+                )
+
+    # ------------------------------------------------------------------
+    # Audio pipeline — Voice Agent
     # ------------------------------------------------------------------
 
     def process_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
-        pass
+        """Feed audio to voice agent for transcription + command processing.
+
+        Called from websocket thread. Audio processing happens asynchronously.
+        """
+        if self._voice_agent is not None:
+            self._voice_agent.ingest_audio(pcm16_data, sample_rate, num_samples)
 
     def get_conversation_state(self) -> dict:
-        return self._conversation_state if self._conversation_state else {}
+        """Get conversation state for protobuf (includes voice agent state)."""
+        base_state = self._conversation_state.copy() if self._conversation_state else {}
+
+        # Merge voice agent state
+        if self._voice_agent is not None:
+            voice_state = self._voice_agent.get_conversation_state()
+            base_state.update(voice_state)
+
+        return base_state
+
+    def process_text_command(self, text: str):
+        """Process a typed command.
+
+        Simple commands (clear, reset, list) are handled instantly.
+        Everything else goes through Gemini NLP via the voice agent.
+        """
+        text = text.strip()
+        if not text:
+            return
+
+        text_lower = text.lower()
+
+        # Instant commands — no LLM needed, zero latency
+        if text_lower in ("clear", "clearall", "reset"):
+            self.set_active_prompts(set())
+            self.clear_effects()
+            logger.info("Cleared all prompts and effects")
+            return
+        if text_lower in ("list", "ls", "show", "status"):
+            active = self.get_active_prompts()
+            effects = self.get_effects()
+            logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
+            return
+
+        # Everything else → Gemini NLP
+        if self._voice_agent is not None:
+            self._voice_agent.process_text_command(text)
+        else:
+            # Voice agent unavailable — direct prompt add as last resort
+            # (no regex parsing — just treat the whole text as a label)
+            self.add_prompt(text_lower)
+            self.set_effect(text_lower, "blur", 1.0)
+            logger.info(f"No voice agent — direct prompt: {text_lower}")
+
+    def _on_voice_command(self, action: str, targets: list[str], effect_type: str, intensity: float, invert: bool = False):
+        """Callback from VoiceAgent: sync SAM3 prompts with voice commands.
+
+        Per spec: "We should always leave requested objects within the array" —
+        prompts persist even after effect removal so SAM3 keeps segmenting them.
+
+        If invert=True, SAM3 segments the targets but the effect applies to
+        everything OUTSIDE those masks (e.g., "blur everything but laptop").
+        """
+        if action in ("add", "change"):
+            for target in targets:
+                self.add_prompt(target)
+                self.set_effect(target, effect_type, intensity, invert=invert)
+            mode = " (inverted)" if invert else ""
+            logger.info(f"Voice → SAM3: add prompts {targets} with {effect_type}@{intensity}{mode}")
+        elif action == "remove":
+            if not targets:
+                # "clear" command — remove ALL prompts and effects
+                self.set_active_prompts(set())
+                self.clear_effects()
+                logger.info("Voice → SAM3: cleared all prompts and effects")
+            else:
+                for target in targets:
+                    self.remove_effect(target)
+                    self.remove_prompt(target)
+                logger.info(f"Voice → SAM3: removed prompts + effects for {targets}")

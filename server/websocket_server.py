@@ -189,6 +189,14 @@ class SocialSenseServer:
                 proto_seg.emotion.emoji = seg.emotion.get("emoji", "")
                 proto_seg.emotion.confidence = seg.emotion.get("confidence", 0.0)
 
+            # Voice agent effects
+            if seg.effect is not None:
+                proto_seg.effect.effect_type = seg.effect.effect_type
+                proto_seg.effect.intensity = seg.effect.intensity
+                proto_seg.effect.color_hex = seg.effect.color_hex
+                for k, v in seg.effect.params.items():
+                    proto_seg.effect.params[k] = v
+
         # Conversation state
         conv_state = self.pipeline.get_conversation_state()
         if conv_state:
@@ -198,6 +206,22 @@ class SocialSenseServer:
             response.conversation.question = conv_state.get("question", "")
             response.conversation.is_other_speaking = conv_state.get("is_other_speaking", False)
             response.conversation.is_user_speaking = conv_state.get("is_user_speaking", False)
+
+            # Voice agent state
+            if "listening" in conv_state:
+                response.conversation.voice_agent.listening = conv_state.get("listening", False)
+                response.conversation.voice_agent.recording = conv_state.get("recording", False)
+                response.conversation.voice_agent.partial_transcript = conv_state.get("partial_transcript", "")
+                response.conversation.voice_agent.last_command = conv_state.get("last_command", "")
+                response.conversation.voice_agent.last_response = conv_state.get("last_response", "")
+                response.conversation.voice_agent.last_command_time = conv_state.get("last_command_time", 0.0)
+
+        # Full-screen filter state
+        if self.pipeline and hasattr(self.pipeline, '_voice_agent') and self.pipeline._voice_agent:
+            fs_filter = self.pipeline._voice_agent.get_full_screen_filter()
+            if fs_filter:
+                response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
+                response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
 
         # Metrics — report honest wall-clock time
         proto_ms = (time.perf_counter() - t0) * 1000
@@ -276,6 +300,15 @@ class SocialSenseServer:
             if mask.shape[:2] != (fh, fw):
                 mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_LINEAR)
             mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).astype(np.uint8)
+
+            # Apply visual effect if present
+            effect_type = seg.effect.effect_type if seg.HasField("effect") else ""
+            if effect_type == "blur":
+                # Blur the region under the mask
+                mask_bool = mask_u8 > 128
+                blurred = cv2.GaussianBlur(frame, (51, 51), 0)
+                frame[mask_bool] = blurred[mask_bool]
+
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 continue
@@ -283,6 +316,9 @@ class SocialSenseServer:
             cv2.drawContours(frame, contours, -1, (0, 0, 0), 5)
             cv2.drawContours(frame, contours, -1, color, 2)
             label = seg.label or seg.asset_class or ""
+            # Show effect type in label
+            if effect_type and effect_type != "none":
+                label = f"{label} [{effect_type}]"
             if label:
                 cx = int(seg.center_x * fw)
                 cy = int(seg.center_y * fh)
@@ -314,11 +350,15 @@ class SocialSenseServer:
         y += 18
 
         active = set()
+        effects = {}
         if self.pipeline is not None:
             active = self.pipeline.get_active_prompts()
+            effects = self.pipeline.get_effects()
         if active:
             for p in sorted(active):
-                cv2.putText(panel, f"> {p}", (12, y), font, 0.4, self._ACTIVE_COLOR, 1, cv2.LINE_AA)
+                fx = effects.get(p, {}).get("type", "")
+                fx_str = f" [{fx}]" if fx else ""
+                cv2.putText(panel, f"> {p}{fx_str}", (12, y), font, 0.4, self._ACTIVE_COLOR, 1, cv2.LINE_AA)
                 y += 18
         else:
             cv2.putText(panel, "(none)", (12, y), font, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
@@ -346,6 +386,33 @@ class SocialSenseServer:
             y += 16
 
         y += 10
+
+        # Voice Agent Status
+        if response.conversation.voice_agent.listening or response.conversation.voice_agent.recording:
+            cv2.putText(panel, "VOICE AGENT", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
+            y += 5
+            cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
+            y += 18
+
+            if response.conversation.voice_agent.recording:
+                status = "RECORDING..."
+                status_color = (0, 255, 0)  # green
+            else:
+                status = "Listening"
+                status_color = (200, 200, 200)
+
+            cv2.putText(panel, status, (12, y), font, 0.35, status_color, 1, cv2.LINE_AA)
+            y += 16
+
+            if response.conversation.voice_agent.last_response:
+                # Wrap long response text
+                resp = response.conversation.voice_agent.last_response
+                if len(resp) > 25:
+                    resp = resp[:25] + "..."
+                cv2.putText(panel, resp, (12, y), font, 0.3, (180, 180, 180), 1, cv2.LINE_AA)
+                y += 14
+
+            y += 10
 
         # Stats
         cv2.putText(panel, "STATS", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
@@ -447,35 +514,16 @@ class SocialSenseServer:
             self._input_text += chr(key)
 
     def _execute_command(self, raw_cmd: str):
-        """Execute a typed command against the pipeline."""
-        from server.commands import parse_command
-
+        """Execute a typed command through the Gemini NLP pipeline."""
         if self.pipeline is None:
             return
 
-        action, target = parse_command(raw_cmd)
-
-        if action == "blur" and target:
-            self.pipeline.add_prompt(target)
-            self._input_log.append(f"+ {target}")
-        elif action == "unblur" and target:
-            self.pipeline.remove_prompt(target)
-            self._input_log.append(f"- {target}")
-        elif action == "clear":
-            self.pipeline.set_active_prompts(set())
-            self._input_log.append("cleared all")
-        elif action == "list":
-            active = self.pipeline.get_active_prompts()
-            self._input_log.append(f"active: {', '.join(sorted(active)) or 'none'}")
-        elif action == "help":
-            from server.commands import KNOWN_LABELS
-            self._input_log.append(f"labels: {', '.join(sorted(KNOWN_LABELS))}")
-        else:
-            self._input_log.append(f"? {raw_cmd}")
-
+        self._input_log.append(raw_cmd.strip())
         # Keep log bounded
         if len(self._input_log) > 10:
             self._input_log = self._input_log[-10:]
+
+        self.pipeline.process_text_command(raw_cmd)
 
     # ------------------------------------------------------------------
     # Non-dashboard helpers
@@ -497,39 +545,23 @@ class SocialSenseServer:
             )
 
     def _handle_control(self, msg: pb.ClientMessage):
-        """Handle control commands from the client.
-
-        Supports prompt control: blur/unblur <label>, clear, list, reset.
-        """
-        from server.commands import parse_command
-
+        """Handle control commands from the client via Gemini NLP pipeline."""
         raw = msg.control.command
         logger.info(f"Control command: {raw}")
 
         if self.pipeline is None:
             return
 
-        # "reset" is a pipeline reset (not prompt clear) — check before parse_command
-        # since parse_command maps "reset" to ("clear", None)
+        # "reset" is a pipeline reset (not prompt clear)
         if raw.strip().lower() == "reset":
             self.pipeline.reset()
             return
 
-        action, target = parse_command(raw)
-
-        if action == "blur" and target:
-            self.pipeline.add_prompt(target)
-        elif action == "unblur" and target:
-            self.pipeline.remove_prompt(target)
-        elif action == "clear":
-            self.pipeline.set_active_prompts(set())
-        elif action == "list":
-            active = self.pipeline.get_active_prompts()
-            logger.info(f"Active prompts: {sorted(active)}")
+        self.pipeline.process_text_command(raw)
 
     async def _console_command_loop(self):
         """Read commands from server console — fallback when cv2 window not focused."""
-        from server.commands import parse_command, CommandInput, KNOWN_LABELS, LABEL_ALIASES
+        from server.commands import CommandInput
 
         cmd_input = CommandInput()
         cmd_input.start()
@@ -538,20 +570,6 @@ class SocialSenseServer:
             while True:
                 await asyncio.sleep(0.2)
                 for raw_cmd in cmd_input.get_commands():
-                    action, target = parse_command(raw_cmd)
-                    if action == "blur" and target:
-                        self.pipeline.add_prompt(target)
-                    elif action == "unblur" and target:
-                        self.pipeline.remove_prompt(target)
-                    elif action == "clear":
-                        self.pipeline.set_active_prompts(set())
-                        logger.info("Cleared all active prompts")
-                    elif action == "list":
-                        active = self.pipeline.get_active_prompts()
-                        logger.info(f"Active prompts: {sorted(active)}")
-                    elif action == "help":
-                        logger.info(f"Labels: {', '.join(sorted(KNOWN_LABELS))}")
-                        logger.info(f"Aliases: {', '.join(f'{k}->{v}' for k, v in sorted(LABEL_ALIASES.items()))}")
-                        logger.info("Commands: blur <obj>, unblur <obj>, clear, list, help")
+                    self.pipeline.process_text_command(raw_cmd)
         except asyncio.CancelledError:
             cmd_input.stop()

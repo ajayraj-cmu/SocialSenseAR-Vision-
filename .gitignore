@@ -64,6 +64,12 @@ recordings/
 *.wav
 *.avi
 
+# Generated cache and benchmarks
+cache/
+ort_trt_cache/
+sam3_vision_int8.cache
+benchmark_results.json
+
 # System
 .DS_Store
 Thumbs.db
@@ -80,4 +86,7 @@ Thumbs.db
 .env.bak
 .env.*
 *.env
+# Allow example so users know which keys to set
+!.env.example
 /calibration_frames
+/archive/

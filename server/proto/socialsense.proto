@@ -74,6 +74,9 @@ message SceneSegment {
 
   // Only populated for segments with label "person" and visible face
   EmotionResult emotion = 15;
+
+  // Voice agent effect metadata (applied per-object)
+  EffectMetadata effect = 16;
 }
 
 message BoundingBox {
@@ -98,6 +101,9 @@ message ConversationState {
   bool is_other_speaking = 5;
   bool is_user_speaking = 6;
   SocialCue social_cue = 10;
+
+  // Voice agent state
+  VoiceAgentState voice_agent = 20;
 }
 
 message SocialCue {
@@ -115,4 +121,32 @@ message PerformanceMetrics {
   float audio_ms = 4;
   float total_ms = 5;
   uint32 segment_count = 6;
+}
+
+// ============================================================
+// VOICE AGENT — Effects & Scene Understanding
+// ============================================================
+
+message EffectMetadata {
+  string effect_type = 1;       // "blur", "dim", "pixelate", "highlight", "outline", "none"
+  float intensity = 2;          // 0.0-1.0
+  string color_hex = 3;         // hex color for outline/highlight (e.g., "#FF0000")
+  map<string, string> params = 4;  // additional effect parameters
+}
+
+message VoiceAgentState {
+  bool listening = 1;           // waiting for wake word
+  bool recording = 2;           // recording utterance after wake word
+  string partial_transcript = 3;  // current utterance being assembled
+  string last_command = 4;      // last executed command text
+  string last_response = 5;     // agent's response/status message
+  double last_command_time = 6; // timestamp of last command execution
+
+  // Active full-screen filter (applied globally, not per-object)
+  FullScreenFilter full_screen_filter = 10;
+}
+
+message FullScreenFilter {
+  string filter_type = 1;       // "dim", "warm", "cool", "night", "grayscale", "none"
+  float intensity = 2;          // 0.0-1.0
 }

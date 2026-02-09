@@ -338,7 +338,7 @@ def main():
     parser.add_argument("--duration", type=int, default=30, help="Benchmark duration in seconds")
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
     parser.add_argument("--no-camera", action="store_true", help="Use synthetic frames")
-    parser.add_argument("--output", default=".", help="Output directory for results")
+    parser.add_argument("--output", default="cache", help="Output directory for results (default: cache/)")
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)

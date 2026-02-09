@@ -21,10 +21,10 @@ The export script supports multiple resolutions. Files are saved with a `_<res>`
 python -m server.vision.sam3_export --resolution 1008
 
 # Step 2: Build vision engine
-python build_trt_engine.py sam3_vision_1008.onnx
+python scripts/build_trt_engine.py sam3_vision_1008.onnx
 
 # Step 3: Build decoder engine
-python build_trt_engine.py sam3_topk_decoder_1008.onnx
+python scripts/build_trt_engine.py sam3_topk_decoder_1008.onnx
 ```
 
 ### Build 784 (faster, lower quality)
@@ -34,10 +34,10 @@ python build_trt_engine.py sam3_topk_decoder_1008.onnx
 python -m server.vision.sam3_export --resolution 784
 
 # Step 2: Build vision engine
-python build_trt_engine.py sam3_vision_784.onnx
+python scripts/build_trt_engine.py sam3_vision_784.onnx
 
 # Step 3: Build decoder engine
-python build_trt_engine.py sam3_topk_decoder_784.onnx
+python scripts/build_trt_engine.py sam3_topk_decoder_784.onnx
 ```
 
 ### Switching Resolutions
@@ -48,7 +48,7 @@ Set `sam3_resolution` in `server/config.py`:
 sam3_resolution: int = 1008   # or 784
 ```
 
-The server looks for `sam3_vision_<res>.engine`, `sam3_topk_decoder_<res>.engine`, and `sam3_meta_<res>.json`. Falls back to unsuffixed filenames if resolution-specific files aren't found.
+The server looks for `sam3_vision_<res>.engine` and `sam3_topk_decoder_<res>.engine` in the project root, and `sam3_meta_<res>.json` in `config/` or the project root. Falls back to unsuffixed filenames if resolution-specific files aren't found.
 
 ## Files After Building Both Resolutions
 
@@ -58,8 +58,8 @@ The server looks for `sam3_vision_<res>.engine`, `sam3_topk_decoder_<res>.engine
 | `sam3_vision_784.onnx` | ~1.8 GB | Vision ONNX at 784 (intermediate) |
 | `sam3_topk_decoder_1008.onnx` | ~90 MB | Decoder ONNX at 1008 (intermediate) |
 | `sam3_topk_decoder_784.onnx` | ~90 MB | Decoder ONNX at 784 (intermediate) |
-| `sam3_meta_1008.json` | ~2 KB | Shapes/config for 1008 (keep) |
-| `sam3_meta_784.json` | ~2 KB | Shapes/config for 784 (keep) |
+| `config/sam3_meta_1008.json` | ~2 KB | Shapes/config for 1008 (keep) |
+| `config/sam3_meta_784.json` | ~2 KB | Shapes/config for 784 (keep) |
 | `sam3_vision_1008.engine` | ~870 MB | TRT FP16 vision at 1008 (keep) |
 | `sam3_vision_784.engine` | ~870 MB | TRT FP16 vision at 784 (keep) |
 | `sam3_topk_decoder_1008.engine` | ~50 MB | TRT FP16 decoder at 1008 (keep) |
@@ -96,7 +96,7 @@ INT8 provides marginal improvement (~7%) on memory-bandwidth-bound ViTs. Only wo
 python capture_calib_frames.py
 
 # Build INT8 engine (~50 min due to calibration)
-python build_trt_int8.py
+python scripts/build_trt_int8.py
 ```
 
 This produces `sam3_vision_int8.engine`. The server auto-detects and prefers it over the FP16 engine.
@@ -120,7 +120,7 @@ You do NOT need to rebuild when:
 
 **OOM during export**: Close Chrome, Discord, etc. The export needs ~5 GB VRAM temporarily.
 
-**OOM during engine build**: `build_trt_engine.py` uses 2 GB workspace. Reduce if needed by editing `set_memory_pool_limit` in the script.
+**OOM during engine build**: `scripts/build_trt_engine.py` uses 2 GB workspace. Reduce if needed by editing `set_memory_pool_limit` in the script.
 
 **Engine loads but crashes at runtime**: Delete `.engine` files and rebuild. Engine format changes between TRT versions.
 

@@ -2,13 +2,14 @@
 
 Architecture:
   FrameGrabber thread  -> always has the latest webcam frame ready
+  AudioStreamer thread  -> captures mic PCM16, sends to server for voice agent
   sender loop          -> encodes JPEG + sends protobuf (fire-and-forget)
   receiver() task      -> collects server responses, tracks round-trip latency
   CommandInput thread  -> reads console commands (blur face, etc.)
 
 All display is handled by the server dashboard window.
 
-Commands (type in console or speak via Whisper):
+Commands (type in console or speak via voice):
     blur <object>       — blur person, face, wall, etc.
     unblur <object>     — stop blurring that object
     <object> blur       — same as "blur <object>"
@@ -16,10 +17,15 @@ Commands (type in console or speak via Whisper):
     list                — show active blur targets
     help                — show available commands
 
+Voice commands (say "Hey Vibe" to start, "Thank you" to end):
+    "Hey Vibe, blur the laptop, thank you"
+    "Hey Vibe, it's too bright, dim everything, thank you"
+    "Hey Vibe, stop blurring the monitor, thank you"
+
 Usage:
     python -m server.main --device cuda
     python -m server.test_client
-    python -m server.test_client --whisper   # enable voice commands
+    python -m server.test_client --whisper   # enable audio streaming to server
 """
 
 import asyncio
@@ -41,33 +47,37 @@ import websockets
 
 sys.path.insert(0, ".")
 from server.proto import socialsense_pb2 as pb
-from server.commands import parse_command, KNOWN_LABELS, LABEL_ALIASES, CommandInput
+from server.commands import CommandInput
+from server.dashboard import Dashboard
 
 
 
-class WhisperInput:
-    """Background thread: listens to microphone, transcribes speech as commands.
+class AudioStreamer:
+    """Background thread: captures PCM16 audio from mic and queues for server.
 
-    Uses openai-whisper (tiny.en) on CPU so it doesn't contend with SAM on GPU.
-    Requires: pip install openai-whisper sounddevice
+    Instead of running local Whisper, sends raw audio to the server where
+    VoiceAgent handles wake word detection, transcription, and command planning.
+    Requires: pip install sounddevice
     """
 
-    def __init__(self):
-        self._queue: queue.Queue[str] = queue.Queue()
+    def __init__(self, sample_rate: int = 16000, chunk_duration: float = 0.5):
+        self._sample_rate = sample_rate
+        self._chunk_duration = chunk_duration
+        self._queue: queue.Queue[bytes] = queue.Queue()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._available = False
 
     def start(self):
         try:
-            import whisper  # noqa: F401
             import sounddevice as sd  # noqa: F401
             self._available = True
             self._thread.start()
-            print("Whisper: listening on microphone (tiny.en model)")
+            print(f"Audio streaming: mic -> server (PCM16 {self._sample_rate}Hz)")
+            print("  Voice commands: say 'Hey Vibe' to start, 'Thank you' to end")
         except ImportError as e:
-            print(f"Whisper unavailable: {e}")
-            print("  Install with: pip install openai-whisper sounddevice")
+            print(f"Audio streaming unavailable: {e}")
+            print("  Install with: pip install sounddevice")
             self._available = False
 
     @property
@@ -75,68 +85,43 @@ class WhisperInput:
         return self._available
 
     def _run(self):
-        import whisper
         import sounddevice as sd
 
-        model = whisper.load_model("tiny.en", device="cpu")
-        sr = 16000
-        chunk_duration = 0.5  # seconds per recording chunk
-        silence_threshold = 0.015  # RMS energy threshold
-        min_speech_chunks = 2  # minimum ~1s of speech
-        max_speech_chunks = 10  # maximum ~5s
+        sr = self._sample_rate
+        chunk_samples = int(sr * self._chunk_duration)
 
-        while self._running:
-            try:
-                audio_chunks = []
-                silence_count = 0
-                recording = False
+        # Accumulator for continuous stream → fixed-size chunks
+        buf = np.zeros(0, dtype=np.float32)
 
-                # Listen for speech
+        def callback(indata, frames, time_info, status):
+            nonlocal buf
+            buf = np.append(buf, indata[:, 0])
+            while len(buf) >= chunk_samples:
+                segment = buf[:chunk_samples]
+                buf = buf[chunk_samples:]
+                pcm16 = (segment * 32767).astype(np.int16)
+                self._queue.put(pcm16.tobytes())
+
+        try:
+            with sd.InputStream(samplerate=sr, channels=1, dtype="float32",
+                                blocksize=chunk_samples, callback=callback):
                 while self._running:
-                    chunk = sd.rec(
-                        int(sr * chunk_duration), samplerate=sr,
-                        channels=1, dtype="float32",
-                    )
-                    sd.wait()
-                    energy = float(np.sqrt(np.mean(chunk ** 2)))
+                    time.sleep(0.1)
+        except Exception as e:
+            print(f"  [Audio] error: {e}")
+            time.sleep(1)
 
-                    if energy > silence_threshold:
-                        audio_chunks.append(chunk)
-                        silence_count = 0
-                        recording = True
-                    elif recording:
-                        silence_count += 1
-                        if silence_count >= 2 or len(audio_chunks) >= max_speech_chunks:
-                            break
-                    # Not recording and no speech — loop back
-
-                if not self._running:
-                    break
-
-                if len(audio_chunks) >= min_speech_chunks:
-                    audio = np.concatenate(audio_chunks).flatten()
-                    result = model.transcribe(
-                        audio, language="en", fp16=False,
-                        no_speech_threshold=0.5,
-                    )
-                    text = result["text"].strip().strip(".")
-                    if text and len(text) > 1:
-                        print(f"  [Whisper] heard: \"{text}\"")
-                        self._queue.put(text)
-
-            except Exception as e:
-                print(f"  [Whisper] error: {e}")
-                time.sleep(1)
-
-    def get_commands(self) -> list[str]:
-        """Non-blocking: return all queued transcriptions."""
-        cmds = []
+    def get_audio_chunks(self) -> list[tuple[bytes, int, int]]:
+        """Non-blocking: return all queued (pcm16_bytes, sample_rate, num_samples)."""
+        chunks = []
         while not self._queue.empty():
             try:
-                cmds.append(self._queue.get_nowait())
+                pcm_bytes = self._queue.get_nowait()
+                num_samples = len(pcm_bytes) // 2  # 2 bytes per PCM16 sample
+                chunks.append((pcm_bytes, self._sample_rate, num_samples))
             except queue.Empty:
                 break
-        return cmds
+        return chunks
 
     def stop(self):
         self._running = False
@@ -204,7 +189,7 @@ def _mask_fingerprint(resp) -> str:
 
 
 async def run_client(url: str, target_fps: int, camera: int,
-                     whisper_enabled: bool = False):
+                     whisper_enabled: bool = False, show_dashboard: bool = False):
     # Check protobuf backend
     try:
         from google.protobuf.internal import api_implementation
@@ -246,8 +231,11 @@ async def run_client(url: str, target_fps: int, camera: int,
             ping_timeout=60,
         ) as ws:
             print(f"Connected! Target {target_fps} fps. Ctrl+C to quit.")
-            print("  Display is on the SERVER window.")
-            print("Commands (type in console):")
+            if show_dashboard:
+                print("  Dashboard: LOCAL window")
+            else:
+                print("  Display is on the SERVER window.")
+            print("Commands (type in console or dashboard):")
             print("  blur <object>  — blur person, face, wall, monitor, etc.")
             print("  unblur <object> — stop blurring that object")
             print("  clear          — remove all blur effects")
@@ -257,13 +245,28 @@ async def run_client(url: str, target_fps: int, camera: int,
             # --- Command input ---
             cmd_input = CommandInput()
             cmd_input.start()
-            whisper_input = None
+            audio_streamer = None
             if whisper_enabled:
-                whisper_input = WhisperInput()
-                whisper_input.start()
+                audio_streamer = AudioStreamer()
+                audio_streamer.start()
 
-            # --- Blur state (sent to server, local tracking for console feedback) ---
-            blur_targets: set[str] = set()
+            # --- Dashboard (local display when --show) ---
+            dashboard = None
+            pending_commands: list[str] = []
+            # Active prompts/effects derived from server response
+            server_prompts: set[str] = set()
+            server_effects: dict[str, dict] = {}
+
+            def on_dashboard_command(cmd: str):
+                pending_commands.append(cmd)
+
+            if show_dashboard:
+                dashboard = Dashboard(
+                    window_name="SocialSenseAR Client",
+                    on_command=on_dashboard_command,
+                    get_active_prompts=lambda: server_prompts,
+                    get_effects=lambda: server_effects,
+                )
 
             # --- Shared state ---
             send_count = 0
@@ -283,33 +286,73 @@ async def run_client(url: str, target_fps: int, camera: int,
             sam_update_times: list[float] = []
 
             # --- Receiver coroutine (runs concurrently) ---
+            _recv_diag_interval = 60  # Log every 60th message
+            _recv_unique_fps = set()   # Unique fingerprints seen
+
             async def receiver():
                 nonlocal recv_count, latest_resp, last_raw_response
+                nonlocal server_prompts, server_effects
                 try:
                     async for raw in ws:
-                        t_recv = time.perf_counter()
-                        resp = pb.ServerMessage()
-                        resp.ParseFromString(raw)
-                        latest_resp = resp
-                        recv_count += 1
+                        try:
+                            t_recv = time.perf_counter()
+                            resp = pb.ServerMessage()
+                            resp.ParseFromString(raw)
+                            latest_resp = resp
+                            recv_count += 1
 
-                        # Detect REAL mask updates by comparing segment content
-                        # (positions + masks), ignoring frame_id/timestamp that
-                        # change every frame and inflated the old metric.
-                        mask_fp = _mask_fingerprint(resp)
-                        if mask_fp != last_raw_response:
-                            last_raw_response = mask_fp
-                            sam_update_times.append(t_recv)
-                            if len(sam_update_times) > 120:
-                                sam_update_times.pop(0)
+                            # --- Receiver diagnostic: log raw + parsed data ---
+                            if recv_count % _recv_diag_interval == 0:
+                                seg_info = []
+                                for s in resp.segments:
+                                    seg_info.append(
+                                        f"cx={s.center_x:.4f} cy={s.center_y:.4f} "
+                                        f"rle={len(s.rle_mask)}B lbl={s.label}"
+                                    )
+                                print(
+                                    f"  [Recv#{recv_count}] raw={len(raw)}B "
+                                    f"fid={resp.frame_id} mfid={resp.masks_frame_id} "
+                                    f"segs={len(resp.segments)} | {seg_info}"
+                                )
 
-                        # Round-trip time (FIFO — server responds in send order)
-                        if send_deque:
-                            sent_at = send_deque.popleft()
-                            rtt_ms = (t_recv - sent_at) * 1000
-                            rtts.append(rtt_ms)
+                            # Extract active prompts/effects from server response
+                            prompts = set()
+                            effects = {}
+                            for seg in resp.segments:
+                                if seg.effect and seg.effect.effect_type and seg.effect.effect_type != "none":
+                                    prompts.add(seg.label)
+                                    effects[seg.label] = {
+                                        "type": seg.effect.effect_type,
+                                        "intensity": seg.effect.intensity,
+                                        "invert": seg.effect.params.get("invert", "") == "true",
+                                    }
+                            server_prompts = prompts
+                            server_effects = effects
+
+                            # Detect REAL mask updates by comparing segment content
+                            mask_fp = _mask_fingerprint(resp)
+                            _recv_unique_fps.add(mask_fp)
+                            if mask_fp != last_raw_response:
+                                last_raw_response = mask_fp
+                                sam_update_times.append(t_recv)
+                                if len(sam_update_times) > 120:
+                                    sam_update_times.pop(0)
+
+                            # Round-trip time (FIFO — server responds in send order)
+                            if send_deque:
+                                sent_at = send_deque.popleft()
+                                rtt_ms = (t_recv - sent_at) * 1000
+                                rtts.append(rtt_ms)
+                        except Exception as e:
+                            import traceback
+                            print(f"  [Recv] ERROR on msg #{recv_count}: {type(e).__name__}: {e}")
+                            traceback.print_exc()
                 except websockets.exceptions.ConnectionClosed:
                     pass
+                except Exception as e:
+                    import traceback
+                    print(f"  [Recv] FATAL: {type(e).__name__}: {e}")
+                    traceback.print_exc()
 
             recv_task = asyncio.create_task(receiver())
 
@@ -352,36 +395,59 @@ async def run_client(url: str, target_fps: int, camera: int,
                     await ws.send(data)
                     send_count += 1
 
-                    # --- Process console + whisper commands ---
-                    all_cmds = cmd_input.get_commands()
-                    if whisper_input and whisper_input.available:
-                        all_cmds.extend(whisper_input.get_commands())
-                    for raw_cmd in all_cmds:
-                        action, target = parse_command(raw_cmd)
-                        if action == "blur" and target:
-                            blur_targets.add(target)
-                            print(f"  + Blur: {target}  (active: {', '.join(sorted(blur_targets))})")
-                        elif action == "unblur" and target:
-                            blur_targets.discard(target)
-                            print(f"  - Unblur: {target}  (active: {', '.join(sorted(blur_targets)) or 'none'})")
-                        elif action == "clear":
-                            blur_targets.clear()
-                            print("  Cleared all blur targets.")
-                        elif action == "list":
-                            if blur_targets:
-                                print(f"  Active blur targets: {', '.join(sorted(blur_targets))}")
-                            else:
-                                print("  No active blur targets.")
-                        elif action == "help":
-                            print("  Available labels: " + ", ".join(sorted(KNOWN_LABELS)))
-                            print("  Aliases: " + ", ".join(f"{k}->{v}" for k, v in sorted(LABEL_ALIASES.items())))
-                            print("  Commands: blur <obj>, unblur <obj>, clear, list, help")
+                    # --- Update dashboard if enabled (show webcam even before server responds) ---
+                    if dashboard:
+                        display_frame, _ = grabber.get()
+                        if display_frame is not None:
+                            # No flip needed - webcam is already right-side up for display
+                            # Use segments from response if available, otherwise empty
+                            resp_ref = latest_resp  # snapshot reference
+                            segments = list(resp_ref.segments) if resp_ref else []
+                            # Log what dashboard will use (every 120th frame)
+                            if send_count % 120 == 0 and resp_ref:
+                                dash_info = [(f"cx={s.center_x:.4f}", f"rle={len(s.rle_mask)}B")
+                                             for s in segments]
+                                print(f"  [DashSnap#{send_count}] resp_id={id(resp_ref)} "
+                                      f"fid={resp_ref.frame_id} mfid={resp_ref.masks_frame_id} "
+                                      f"segs={dash_info}")
+                            # Extract voice agent state if present
+                            va_state = None
+                            if latest_resp:
+                                va = latest_resp.conversation.voice_agent
+                                if va.listening or va.recording or va.last_response:
+                                    va_state = {
+                                        'listening': va.listening,
+                                        'recording': va.recording,
+                                        'partial_transcript': va.partial_transcript,
+                                        'last_command': va.last_command,
+                                        'last_response': va.last_response,
+                                    }
+                            dashboard.update(display_frame, segments, va_state)
+                            # Yield after blocking dashboard render so receiver can drain messages
+                            await asyncio.sleep(0)
 
-                        # Send command to server to update SAM3 active prompts
-                        if action in ("blur", "unblur", "clear"):
-                            ctrl = pb.ClientMessage()
-                            ctrl.control.command = raw_cmd.strip()
-                            await ws.send(ctrl.SerializeToString())
+                    # --- Stream audio to server (voice agent handles it) ---
+                    if audio_streamer and audio_streamer.available:
+                        for pcm_bytes, sr, n_samples in audio_streamer.get_audio_chunks():
+                            audio_msg = pb.ClientMessage()
+                            audio_msg.audio.pcm16_data = pcm_bytes
+                            audio_msg.audio.sample_rate = sr
+                            audio_msg.audio.num_samples = n_samples
+                            await ws.send(audio_msg.SerializeToString())
+
+                    # --- Process console + dashboard commands ---
+                    all_cmds = cmd_input.get_commands()
+                    all_cmds.extend(pending_commands)
+                    pending_commands.clear()
+                    for raw_cmd in all_cmds:
+                        raw_cmd = raw_cmd.strip()
+                        if not raw_cmd:
+                            continue
+                        # Send raw text to server — server runs it through Gemini NLP
+                        ctrl = pb.ClientMessage()
+                        ctrl.control.command = raw_cmd
+                        await ws.send(ctrl.SerializeToString())
+                        print(f"  > Sent: {raw_cmd}")
 
                     # Print stats periodically
                     if send_count % stats_interval == 0 and send_count > 0:
@@ -401,13 +467,16 @@ async def run_client(url: str, target_fps: int, camera: int,
                             f"Mask: {sam_fps:4.1f} fps | "
                             f"RTT avg: {avg_rtt:5.1f}ms p95: {p95_rtt:5.1f}ms | "
                             f"Segs: {n_segs:2d} | "
+                            f"UniqFP: {len(_recv_unique_fps)} | "
                             f"Frames: {send_count}"
                         )
 
-                    # Throttle to target FPS (busy-wait to avoid Windows timer granularity)
+                    # Throttle to target FPS
                     target_time = t_loop + interval
                     while time.perf_counter() < target_time:
                         await asyncio.sleep(0)
+                    # Always yield at least once so receiver coroutine can run
+                    await asyncio.sleep(0)
 
             except KeyboardInterrupt:
                 print("\nStopped by user")
@@ -418,8 +487,10 @@ async def run_client(url: str, target_fps: int, camera: int,
                 except asyncio.CancelledError:
                     pass
                 cmd_input.stop()
-                if whisper_input:
-                    whisper_input.stop()
+                if audio_streamer:
+                    audio_streamer.stop()
+                if dashboard:
+                    dashboard.close()
 
     except (ConnectionRefusedError, OSError) as e:
         print(f"ERROR: Cannot connect to {url} ({e})")
@@ -435,10 +506,20 @@ def main():
     parser.add_argument("--url", default="ws://localhost:8765", help="Server URL")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS")
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
-    parser.add_argument("--whisper", action="store_true",
-                        help="Enable voice commands via Whisper (requires openai-whisper + sounddevice)")
+    parser.add_argument("--no-audio", action="store_true",
+                        help="Disable audio streaming (audio is enabled by default)")
+    parser.add_argument("--show", action="store_true",
+                        help="Show local dashboard (required for remote servers like Modal)")
     args = parser.parse_args()
-    asyncio.run(run_client(args.url, args.fps, args.camera, args.whisper))
+
+    # Auto-enable --show for remote (non-localhost) URLs
+    show = args.show
+    if not show and "localhost" not in args.url and "127.0.0.1" not in args.url:
+        print("Remote URL detected, enabling local dashboard (--show)")
+        show = True
+
+    audio = not args.no_audio
+    asyncio.run(run_client(args.url, args.fps, args.camera, audio, show))
 
 
 if __name__ == "__main__":

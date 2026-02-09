@@ -16,7 +16,8 @@ import time
 import numpy as np
 import cv2
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Repo root (parent of scripts/)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def setup_trt_path():
@@ -64,7 +65,7 @@ class Sam3VisionCalibrator(_get_calibrator_base()):
     Uses torch.cuda for GPU memory (avoids pycuda dependency).
     """
 
-    def __init__(self, calib_dir, max_frames=300, cache_file="sam3_vision_int8.cache"):
+    def __init__(self, calib_dir, max_frames=300, cache_file="cache/sam3_vision_int8.cache"):
         super().__init__()
         import torch
 
@@ -179,7 +180,7 @@ def build_int8_engine(onnx_path, engine_path, calib_dir, max_calib_frames=300):
     calibrator = Sam3VisionCalibrator(
         calib_dir=calib_dir,
         max_frames=max_calib_frames,
-        cache_file="sam3_vision_int8.cache"
+        cache_file="cache/sam3_vision_int8.cache"
     )
     config.int8_calibrator = calibrator
 

@@ -2,7 +2,12 @@
 
 Used by both the WebSocket server and the test client to parse
 commands like "blur laptop", "unblur person", "clear", etc.
+
+Supports negation:
+    "blur everything but laptop"  -> ("blur", "laptop", True)
+    "blur all except person"      -> ("blur", "person", True)
 """
+import re
 import queue
 import threading
 
@@ -35,29 +40,58 @@ LABEL_ALIASES = {
 }
 
 
-def parse_command(text: str) -> tuple[str, str | None]:
-    """Parse a command string into (action, target).
+def parse_command(text: str) -> tuple[str, str | None, bool]:
+    """Parse a command string into (action, target, invert).
+
+    Returns:
+        (action, target, invert) where invert=True means effect applies to
+        everything EXCEPT the target mask.
 
     Supports:
-        "blur face"      -> ("blur", "face")
-        "face blur"      -> ("blur", "face")
-        "unblur person"  -> ("unblur", "person")
-        "person unblur"  -> ("unblur", "person")
-        "clear"          -> ("clear", None)
-        "list"           -> ("list", None)
-        "help"           -> ("help", None)
+        "blur face"                    -> ("blur", "face", False)
+        "face blur"                    -> ("blur", "face", False)
+        "unblur person"                -> ("unblur", "person", False)
+        "blur everything but laptop"   -> ("blur", "laptop", True)
+        "blur all except person"       -> ("blur", "person", True)
+        "dim everything around me"     -> ("dim", "person", True)
+        "clear"                        -> ("clear", None, False)
+        "list"                         -> ("list", None, False)
+        "help"                         -> ("help", None, False)
     """
     text = text.strip().lower()
     if not text:
-        return ("", None)
+        return ("", None, False)
 
     # Single-word commands
     if text in ("clear", "reset", "clearall"):
-        return ("clear", None)
+        return ("clear", None, False)
     if text in ("list", "ls", "show", "status"):
-        return ("list", None)
+        return ("list", None, False)
     if text in ("help", "?", "commands"):
-        return ("help", None)
+        return ("help", None, False)
+
+    # Detect negation: "blur everything but X", "dim all except X", "blur everything around X"
+    invert = False
+    negation_match = re.search(
+        r'(?:everything|all)\s+(?:but|except|around|other\s+than|besides)\s+(?:the\s+)?(\S+)',
+        text,
+    )
+    if negation_match:
+        invert = True
+        target_word = negation_match.group(1)
+        # Detect action from the beginning
+        action = "blur"  # default
+        if text.startswith(("dim", "darken")):
+            action = "dim"
+        elif text.startswith("pixelate"):
+            action = "pixelate"
+        elif text.startswith("highlight"):
+            action = "highlight"
+        # "me" / "myself" → person
+        if target_word in ("me", "myself", "us"):
+            target_word = "person"
+        target_word = LABEL_ALIASES.get(target_word, target_word)
+        return (action, target_word, True)
 
     words = text.split()
 
@@ -67,6 +101,12 @@ def parse_command(text: str) -> tuple[str, str | None]:
     for w in words:
         if w in ("blur", "blr", "blue"):  # handle typos
             action = "blur"
+        elif w in ("dim", "darken"):
+            action = "dim"
+        elif w in ("pixelate",):
+            action = "pixelate"
+        elif w in ("highlight",):
+            action = "highlight"
         elif w in ("unblur", "unblr", "remove", "stop", "off"):
             action = "unblur"
         else:
@@ -81,7 +121,7 @@ def parse_command(text: str) -> tuple[str, str | None]:
         # Resolve aliases
         target = LABEL_ALIASES.get(target, target)
 
-    return (action, target)
+    return (action, target, invert)
 
 
 class CommandInput:
