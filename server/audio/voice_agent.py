@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CommandPlan:
     """Structured command plan from Gemini reasoning."""
-    targets: list[str]  # object labels to target
+    targets: list[str]  # object labels to target (SAM3 segments these)
     effect_type: str  # "blur", "dim", "pixelate", etc.
     intensity: float  # 0.0-1.0
     action: str  # "add", "remove", "change"
+    invert: bool = False  # True = effect on everything EXCEPT targets (targets are the "safe" objects)
     full_screen_filter: Optional[str] = None  # "dim", "warm", etc.
     full_screen_intensity: float = 0.5
     reasoning: str = ""
@@ -49,7 +50,14 @@ class WakeWordGate:
         r'\bhey\s+vibe\b',
         r'\bhey\s+vibes\b',
         r'\bhey\s+vive\b',
-        r'\bhey\s+five\b',  # common misrecognition
+        r'\bhey\s+five\b',
+        r'\bhey\s+bive\b',
+        r'\bhey\s+vine\b',
+        r'\bhey\s+vise\b',
+        r'\bhey\s+vype\b',
+        r'\bhey\s+bye\b',
+        r'\bhey\s+vi\b',
+        r'\bhey\s+v\w+e\b',  # catch-all: "hey v___e"
     ]
 
     def __init__(self):
@@ -67,9 +75,10 @@ class WakeWordGate:
 
 
 class UtteranceAssembler:
-    """Assembles full utterance from wake word to end phrase ("Thank you").
+    """Assembles utterance after wake word.
 
-    Collects transcript chunks and detects end phrase.
+    Auto-completes after timeout (no end phrase required).
+    "Thank you" / "thanks" is an optional early terminator.
     """
 
     END_PATTERNS = [
@@ -78,15 +87,21 @@ class UtteranceAssembler:
         r'\bthank\s+ya\b',
     ]
 
-    def __init__(self):
+    def __init__(self, timeout: float = 4.0):
         self._patterns = [re.compile(p, re.IGNORECASE) for p in self.END_PATTERNS]
         self._active = False
         self._chunks: list[str] = []
+        self._timeout = timeout
+        self._last_chunk_time: float = 0.0
 
-    def start(self):
-        """Start collecting utterance (called after wake word detected)."""
+    def start(self, initial_text: str = ""):
+        """Start collecting utterance. initial_text is any command text
+        that appeared in the same transcript as the wake word."""
         self._active = True
         self._chunks.clear()
+        self._last_chunk_time = time.time()
+        if initial_text.strip():
+            self._chunks.append(initial_text.strip())
 
     def add_chunk(self, text: str) -> Optional[str]:
         """Add transcript chunk. Returns complete utterance if end phrase detected."""
@@ -94,17 +109,34 @@ class UtteranceAssembler:
             return None
 
         self._chunks.append(text)
+        self._last_chunk_time = time.time()
 
-        # Check for end phrase
+        # Check for optional end phrase
         full_text = ' '.join(self._chunks)
         for pattern in self._patterns:
             if pattern.search(full_text):
-                # Found end phrase — return utterance without end phrase
                 utterance = pattern.sub('', full_text, count=1).strip()
                 self.reset()
-                return utterance
+                return utterance if utterance else None
 
         return None
+
+    def check_timeout(self) -> Optional[str]:
+        """Check if timeout has elapsed. Returns utterance if so."""
+        if not self._active or not self._chunks:
+            return None
+        if time.time() - self._last_chunk_time >= self._timeout:
+            full_text = ' '.join(self._chunks)
+            # Strip any end phrases that might be partial
+            for pattern in self._patterns:
+                full_text = pattern.sub('', full_text).strip()
+            self.reset()
+            return full_text if full_text else None
+        return None
+
+    def has_content(self) -> bool:
+        """True if there's at least some text collected."""
+        return self._active and len(self._chunks) > 0
 
     def reset(self):
         """Reset state (ready for next wake word)."""
@@ -130,7 +162,7 @@ class VoiceCommandPlanner:
     - Full-screen filters ("dim everything")
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash-exp"):
+    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash"):
         self._api_key = api_key
         self._model = model
         self._client = None
@@ -162,67 +194,66 @@ class VoiceCommandPlanner:
         utterance: str,
         known_objects: set[str],
         active_effects: dict[str, dict],
-        visible_objects: list[str] = None,
-        scene_context: str = "",
     ) -> CommandPlan:
-        """Map natural language utterance to structured command plan.
+        """Map natural language utterance to structured command plan via Gemini.
 
         Args:
-            utterance: User's command text (wake word and end phrase already stripped)
+            utterance: User's command text
             known_objects: Set of object labels we've seen before
             active_effects: Current effect state {label: {"type": "blur", "intensity": 0.8}}
-            visible_objects: Objects currently visible (from Gemini Vision or SAM3)
-            scene_context: Scene description from Gemini Vision
 
         Returns:
             CommandPlan with targets, effect, action, reasoning
         """
         if not self._available:
-            # Fallback: simple keyword matching
-            return self._fallback_plan(utterance, known_objects, active_effects)
+            logger.warning(f"Gemini unavailable, treating utterance as raw label: {utterance}")
+            return CommandPlan(
+                targets=[utterance.strip().lower()],
+                effect_type="blur",
+                intensity=1.0,
+                action="add",
+                reasoning="Gemini unavailable — raw label",
+            )
 
         try:
-            # Build context string
             known_str = ', '.join(sorted(known_objects)) if known_objects else 'none'
-            visible_str = ', '.join(visible_objects) if visible_objects else 'unknown'
             active_str = ', '.join(f"{k}:{v['type']}" for k, v in active_effects.items()) if active_effects else 'none'
 
-            prompt = f"""Parse this voice command and create a structured action plan.
+            prompt = f"""Parse this command into a structured action plan. Respond ONLY with JSON.
 
 User said: "{utterance}"
 
 Context:
-- Known objects (seen before): {known_str}
-- Currently visible: {visible_str}
+- Known objects: {known_str}
 - Active effects: {active_str}
-- Scene: {scene_context or 'Unknown'}
 
-Determine:
-1. **targets**: Which specific object labels to target (from known or visible objects)
-2. **effect_type**: "blur", "dim", "pixelate", "highlight", "outline", or "none"
-3. **intensity**: 0.0 (light) to 1.0 (strong)
-4. **action**: "add" (apply new effect), "remove" (clear effect), or "change" (modify existing)
-5. **full_screen_filter**: If request is global/environmental ("dim everything"), use "dim"/"warm"/"cool"/"night"/"grayscale", else null
-6. **full_screen_intensity**: 0.0-1.0 for full-screen filter
-7. **reasoning**: Brief explanation
+Output JSON with these fields:
+- "targets": list of object labels. ALWAYS include any object the user names, even if not in the known set. SAM3 will search for it.
+- "effect_type": "blur" | "dim" | "pixelate" | "highlight" | "outline"
+- "intensity": 0.0-1.0 (default 0.8)
+- "action": "add" | "remove" | "change"
+- "invert": true if effect applies to everything EXCEPT targets (e.g. "blur everything but laptop")
+- "full_screen_filter": "dim" | "warm" | "cool" | "night" | "grayscale" | null
+- "full_screen_intensity": 0.0-1.0
+- "reasoning": brief explanation
 
 Rules:
-- If object named explicitly ("blur laptop"), use that object
-- If object is in known set but not visible, still target it (persistent effects)
-- If request is vague ("too bright"), infer appropriate targets (lights, screens, windows)
-- For "stop X" or "unblur X", action is "remove"
-- For "dim it" or "it's too bright", apply full_screen_filter="dim" + target bright objects
-- If no objects match, return empty targets
+- "blur phone" → targets: ["phone"], effect_type: "blur", action: "add"
+- "pixelate laptop" → targets: ["laptop"], effect_type: "pixelate", action: "add"
+- "stop blurring person" → targets: ["person"], action: "remove"
+- "blur everything but me" → targets: ["person"], invert: true
+- NEVER return empty targets if the user names an object
+- If just an object name with no action ("person"), default to blur
 
-Format as JSON:
 {{
-    "targets": ["laptop", "monitor"],
-    "effect_type": "blur",
+    "targets": ["phone"],
+    "effect_type": "pixelate",
     "intensity": 0.8,
     "action": "add",
+    "invert": false,
     "full_screen_filter": null,
     "full_screen_intensity": 0.5,
-    "reasoning": "User wants to blur screens"
+    "reasoning": "User wants to pixelate the phone"
 }}"""
 
             response = self._client.generate_content(prompt)
@@ -239,69 +270,28 @@ Format as JSON:
 
             plan = CommandPlan(
                 targets=data.get("targets", []),
-                effect_type=data.get("effect_type", "none"),
-                intensity=float(data.get("intensity", 1.0)),
+                effect_type=data.get("effect_type", "blur"),
+                intensity=float(data.get("intensity", 0.8)),
                 action=data.get("action", "add"),
+                invert=bool(data.get("invert", False)),
                 full_screen_filter=data.get("full_screen_filter"),
                 full_screen_intensity=float(data.get("full_screen_intensity", 0.5)),
                 reasoning=data.get("reasoning", ""),
             )
 
-            logger.info(f"Command plan: {plan.action} {plan.effect_type} to {plan.targets}")
-            logger.debug(f"Reasoning: {plan.reasoning}")
-
+            logger.info(f"Gemini plan: {plan.action} {plan.effect_type} → {plan.targets} (invert={plan.invert})")
             return plan
 
         except Exception as e:
-            logger.error(f"Gemini planning error: {e}", exc_info=True)
-            return self._fallback_plan(utterance, known_objects, active_effects)
-
-    def _fallback_plan(
-        self,
-        utterance: str,
-        known_objects: set[str],
-        active_effects: dict[str, dict],
-    ) -> CommandPlan:
-        """Simple keyword-based planning when Gemini unavailable."""
-        text_lower = utterance.lower()
-
-        # Detect effect type
-        effect = "blur"  # default
-        if any(w in text_lower for w in ["dim", "darken", "darker"]):
-            effect = "dim"
-        elif "highlight" in text_lower:
-            effect = "highlight"
-        elif "pixelate" in text_lower:
-            effect = "pixelate"
-
-        # Detect action
-        action = "add"
-        if any(w in text_lower for w in ["stop", "remove", "unblur", "undim", "clear"]):
-            action = "remove"
-
-        # Extract targets from known objects
-        targets = []
-        for obj in known_objects:
-            if obj.lower() in text_lower:
-                targets.append(obj)
-
-        # If no targets but "everything" or "background" mentioned
-        full_screen = None
-        if any(w in text_lower for w in ["everything", "all", "background", "too bright", "overstimulating"]):
-            full_screen = "dim"
-            # Also target common environmental objects if known
-            env_keywords = {"wall", "floor", "ceiling", "light", "lamp", "window", "screen", "monitor"}
-            targets.extend([obj for obj in known_objects if obj.lower() in env_keywords])
-
-        return CommandPlan(
-            targets=targets,
-            effect_type=effect,
-            intensity=0.7,
-            action=action,
-            full_screen_filter=full_screen,
-            full_screen_intensity=0.5,
-            reasoning="Fallback: keyword-based parsing (Gemini unavailable)",
-        )
+            # Gemini error — treat the raw utterance as a label rather than failing silently
+            logger.error(f"Gemini planning error: {e}")
+            return CommandPlan(
+                targets=[utterance.strip().lower()],
+                effect_type="blur",
+                intensity=0.8,
+                action="add",
+                reasoning=f"Gemini error, raw label: {e}",
+            )
 
     def shutdown(self):
         """Clean up."""
@@ -352,38 +342,85 @@ class VoiceAgent:
             "last_command_time": 0.0,
         }
 
-        # Processing queue (audio transcription + command planning happen on background thread)
-        self._process_queue: queue.Queue = queue.Queue()
-        self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        # Audio transcription queue — only latest chunk matters, stale ones are dropped
+        self._audio_queue: queue.Queue = queue.Queue()
+        self._audio_thread = threading.Thread(target=self._audio_loop, daemon=True)
+
+        # Text command queue — separate thread so typed commands never wait behind audio
+        self._text_queue: queue.Queue = queue.Queue()
+        self._text_thread = threading.Thread(target=self._text_loop, daemon=True)
+
         self._running = True
+
+        # Callback for SAM3 prompt sync (set by orchestrator)
+        self._on_command_callback = None
 
         # Cached frame for Gemini Vision
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_lock = threading.Lock()
 
+    def set_on_command_callback(self, callback):
+        """Set callback invoked when voice commands execute.
+
+        Signature: callback(action, targets, effect_type, intensity, invert)
+        Used by orchestrator to sync SAM3 prompts with voice agent targets.
+        """
+        self._on_command_callback = callback
+
+    def process_text_command(self, text: str):
+        """Process a typed text command through the same Gemini pipeline as voice.
+
+        Skips wake word detection and utterance assembly — goes straight to
+        command planning and execution. Runs on a separate thread from audio
+        so typed commands are never blocked by audio transcription.
+        """
+        text = text.strip()
+        if not text:
+            return
+        logger.info(f"Text command: {text}")
+        self._text_queue.put(text)
+
     def start(self):
-        """Start background processing thread."""
-        self._process_thread.start()
-        logger.info("VoiceAgent started")
+        """Start background processing threads."""
+        self._audio_thread.start()
+        self._text_thread.start()
+        logger.info("VoiceAgent started (audio + text threads)")
+
+    # Minimum RMS energy to bother transcribing (skip silence)
+    _SILENCE_RMS_THRESHOLD = 300  # PCM16 range is -32768..32767, typical speech RMS > 500
 
     def ingest_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
         """Called from websocket thread to feed audio data.
 
         Audio is buffered and processed asynchronously.
+        Uses 2s chunks for fast wake word detection.
         """
         with self._buffer_lock:
             self._audio_buffer.extend(pcm16_data)
             self._sample_rate = sample_rate
 
-            # Trigger transcription when we have enough audio (~2s chunks)
-            min_samples = sample_rate * 2
-            if len(self._audio_buffer) >= min_samples * 2:  # 2 bytes per PCM16 sample
-                # Extract chunk
-                chunk_bytes = bytes(self._audio_buffer[:min_samples * 2])
-                self._audio_buffer = self._audio_buffer[min_samples * 2:]
+            # 2-second chunks — fast enough for responsive wake word detection
+            chunk_seconds = 2
+            min_bytes = sample_rate * chunk_seconds * 2  # 2 bytes per PCM16 sample
+            if len(self._audio_buffer) >= min_bytes:
+                chunk_bytes = bytes(self._audio_buffer[:min_bytes])
+                self._audio_buffer = self._audio_buffer[min_bytes:]
 
-                # Queue for async processing
-                self._process_queue.put(("transcribe", chunk_bytes, sample_rate))
+                # Energy gate: skip silence (don't waste Whisper API calls)
+                samples = np.frombuffer(chunk_bytes, dtype=np.int16)
+                rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
+                if rms < self._SILENCE_RMS_THRESHOLD:
+                    return  # silence, skip
+
+                # During listening (pre-wake-word): drop stale chunks, only latest matters.
+                # During recording (post-wake-word): keep all chunks for accurate assembly.
+                if not self._assembler.is_active:
+                    try:
+                        while not self._audio_queue.empty():
+                            self._audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                self._audio_queue.put((chunk_bytes, sample_rate))
 
     def update_frame(self, frame_bgr: np.ndarray):
         """Update latest camera frame for Gemini Vision (called from pipeline orchestrator)."""
@@ -414,24 +451,41 @@ class VoiceAgent:
         with self._state_lock:
             self._known_objects.add(label)
 
-    def _process_loop(self):
-        """Background thread: transcribe audio + execute commands."""
+    def _audio_loop(self):
+        """Background thread: transcribe audio chunks."""
         while self._running:
             try:
-                item = self._process_queue.get(timeout=0.5)
-                if item is None:
-                    break
-
-                cmd_type = item[0]
-
-                if cmd_type == "transcribe":
-                    _, audio_bytes, sr = item
+                # Short timeout so we can check assembler timeout frequently
+                try:
+                    audio_bytes, sr = self._audio_queue.get(timeout=0.5)
                     self._handle_transcription(audio_bytes, sr)
+                except queue.Empty:
+                    pass
 
+                # Check if assembler timed out (auto-complete without end phrase)
+                utterance = self._assembler.check_timeout()
+                if utterance:
+                    logger.info(f"Utterance (auto-complete): \"{utterance}\"")
+                    self._execute_command(utterance)
+                    self._conversation_state.update({
+                        "listening": True,
+                        "recording": False,
+                        "partial_transcript": "",
+                    })
+
+            except Exception as e:
+                logger.error(f"Audio loop error: {e}", exc_info=True)
+
+    def _text_loop(self):
+        """Background thread: process typed text commands (never blocked by audio)."""
+        while self._running:
+            try:
+                text = self._text_queue.get(timeout=0.5)
+                self._execute_command(text)
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"Voice agent process loop error: {e}", exc_info=True)
+                logger.error(f"Text command loop error: {e}", exc_info=True)
 
     def _handle_transcription(self, audio_bytes: bytes, sample_rate: int):
         """Transcribe audio chunk and process for wake word / command assembly."""
@@ -442,29 +496,38 @@ class VoiceAgent:
         if not text:
             return
 
-        logger.debug(f"Transcript: \"{text}\"")
+        logger.info(f"Transcript: \"{text}\"")
 
         # Check for wake word
         if not self._assembler.is_active and self._wake_gate.detect(text):
-            logger.info("Wake word detected!")
-            self._assembler.start()
+            # Strip wake word — keep any command text that follows it
+            remainder = self._wake_gate.strip_wake_word(text).strip()
+            logger.info(f"Wake word detected! remainder: \"{remainder}\"")
+            self._assembler.start(initial_text=remainder)
             self._conversation_state.update({
                 "listening": False,
                 "recording": True,
-                "partial_transcript": "",
+                "partial_transcript": remainder,
                 "last_response": "Listening...",
             })
+            # If there's already a command in the same transcript, check if it's complete
+            if remainder:
+                complete = self._assembler.add_chunk("")  # check end phrases in initial text
+                if complete:
+                    logger.info(f"Immediate command: \"{complete}\"")
+                    self._execute_command(complete)
+                    self._conversation_state.update({
+                        "listening": True,
+                        "recording": False,
+                        "partial_transcript": "",
+                    })
             return
 
-        # Assemble utterance
+        # Assemble utterance (recording phase)
         if self._assembler.is_active:
             complete_utterance = self._assembler.add_chunk(text)
 
-            # Update partial transcript for dashboard
-            if complete_utterance is None:
-                self._conversation_state["partial_transcript"] = self._assembler.get_partial()
-            else:
-                # Complete command received
+            if complete_utterance is not None:
                 logger.info(f"Complete utterance: \"{complete_utterance}\"")
                 self._execute_command(complete_utterance)
                 self._conversation_state.update({
@@ -472,9 +535,11 @@ class VoiceAgent:
                     "recording": False,
                     "partial_transcript": "",
                 })
+            else:
+                self._conversation_state["partial_transcript"] = self._assembler.get_partial()
 
     def _execute_command(self, utterance: str):
-        """Execute complete voice command: plan → update state → apply effects."""
+        """Execute command: Gemini plan → update state → apply effects."""
         t0 = time.time()
 
         # Get current state
@@ -482,22 +547,11 @@ class VoiceAgent:
             known_objs = self._known_objects.copy()
             active_fx = self._active_effects.copy()
 
-        # Get visible objects from Gemini Vision (on-demand)
-        visible_objects = []
-        scene_context = ""
-        with self._frame_lock:
-            if self._latest_frame is not None and self._scene.available:
-                snapshot = self._scene.snapshot(self._latest_frame)
-                visible_objects = snapshot.get("objects", [])
-                scene_context = snapshot.get("scene_description", "")
-
-        # Plan command using Gemini reasoning
+        # Plan command using Gemini reasoning (single API call — no scene snapshot)
         plan = self._planner.plan_command(
             utterance,
             known_objs,
             active_fx,
-            visible_objects,
-            scene_context,
         )
 
         # Execute plan: update state
@@ -509,8 +563,10 @@ class VoiceAgent:
                     self._active_effects[target] = {
                         "type": plan.effect_type,
                         "intensity": plan.intensity,
+                        "invert": plan.invert,
                     }
-                    logger.info(f"Applied {plan.effect_type} to {target}")
+                    mode = "inverted" if plan.invert else "direct"
+                    logger.info(f"Applied {plan.effect_type} ({mode}) to {target}")
 
             elif plan.action == "remove":
                 # Remove effects (but keep objects in known registry for persistence)
@@ -532,6 +588,15 @@ class VoiceAgent:
                 self._active_effects.clear()
                 logger.info("Cleared all effects")
 
+        # Notify orchestrator to sync SAM3 prompts with voice command
+        if self._on_command_callback:
+            try:
+                self._on_command_callback(
+                    plan.action, plan.targets, plan.effect_type, plan.intensity, plan.invert,
+                )
+            except Exception as e:
+                logger.error(f"on_command callback error: {e}")
+
         # Update conversation state
         response = self._generate_response(plan)
         self._conversation_state.update({
@@ -548,6 +613,8 @@ class VoiceAgent:
         if plan.action == "add":
             if plan.targets:
                 objs = ", ".join(plan.targets)
+                if plan.invert:
+                    return f"Applied {plan.effect_type} to everything except {objs}"
                 return f"Applied {plan.effect_type} to {objs}"
             elif plan.full_screen_filter:
                 return f"Applied {plan.full_screen_filter} filter"
@@ -567,7 +634,8 @@ class VoiceAgent:
     def shutdown(self):
         """Stop processing and clean up."""
         self._running = False
-        self._process_queue.put(None)
-        if self._process_thread.is_alive():
-            self._process_thread.join(timeout=2)
+        if self._audio_thread.is_alive():
+            self._audio_thread.join(timeout=2)
+        if self._text_thread.is_alive():
+            self._text_thread.join(timeout=2)
         logger.info("VoiceAgent shut down")

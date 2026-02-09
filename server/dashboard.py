@@ -8,6 +8,7 @@ Shows camera feed + mask overlays + status panel + input bar.
 """
 
 import time
+import traceback
 import cv2
 import numpy as np
 from typing import Optional, Callable
@@ -58,6 +59,12 @@ class Dashboard:
         self._mask_update_times: list[float] = []
         self._last_mask_fingerprint = ""
         self._window_created = False
+        self._render_error_count = 0
+        self._last_seg_debug = 0.0
+
+        # Create window with GUI_NORMAL for macOS title bar (red/yellow/green buttons)
+        cv2.namedWindow(self.window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
+        self._window_created = True
 
     def update(
         self,
@@ -89,10 +96,26 @@ class Dashboard:
             if len(self._mask_update_times) > 120:
                 self._mask_update_times.pop(0)
 
+        # --- Debug: log segment data periodically ---
+        now = time.time()
+        if segments and now - self._last_seg_debug > 3.0:
+            self._last_seg_debug = now
+            for i, seg in enumerate(segments):
+                rle = getattr(seg, 'rle_mask', b'')
+                mw = getattr(seg, 'mask_width', 0)
+                mh = getattr(seg, 'mask_height', 0)
+                conf = getattr(seg, 'confidence', -1)
+                cx = getattr(seg, 'center_x', -1)
+                cy = getattr(seg, 'center_y', -1)
+                lbl = getattr(seg, 'label', '?')
+                print(f"  [Dashboard] seg[{i}]: label={lbl} conf={conf:.3f} "
+                      f"rle={len(rle)}B mask={mw}x{mh} center=({cx:.3f},{cy:.3f}) "
+                      f"frame={fh}x{fw}")
+
         # --- Draw mask overlays ---
         for i, seg in enumerate(segments):
             conf = getattr(seg, 'confidence', 1.0)
-            if conf < 0.75:
+            if conf < 0.10:
                 continue
 
             rle_mask = getattr(seg, 'rle_mask', None)
@@ -111,11 +134,16 @@ class Dashboard:
                 # Apply blur effect if present
                 effect = getattr(seg, 'effect', None)
                 effect_type = ""
+                is_inverted = False
                 if effect:
                     effect_type = getattr(effect, 'effect_type', '')
+                    params = getattr(effect, 'params', {})
+                    is_inverted = params.get("invert", "") == "true" if params else False
 
                 if effect_type == "blur":
                     mask_bool = mask_u8 > 128
+                    if is_inverted:
+                        mask_bool = ~mask_bool  # Blur everything OUTSIDE the mask
                     blurred = cv2.GaussianBlur(display_frame, (51, 51), 0)
                     display_frame[mask_bool] = blurred[mask_bool]
 
@@ -136,8 +164,11 @@ class Dashboard:
                         (tw, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                         cv2.rectangle(display_frame, (cx - 3, cy - th_ - 4), (cx + tw + 3, cy + 4), (0, 0, 0), -1)
                         cv2.putText(display_frame, label, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            except Exception:
-                pass
+            except Exception as e:
+                self._render_error_count += 1
+                if self._render_error_count <= 5:
+                    print(f"  [Dashboard] RENDER ERROR #{self._render_error_count}: {e}")
+                    traceback.print_exc()
 
         # --- Build canvas: frame | panel (top), input bar (bottom) ---
         pw = self._PANEL_W
@@ -182,7 +213,7 @@ class Dashboard:
         cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
         y += 18
 
-        shown_segs = [s for s in segments if getattr(s, 'confidence', 1.0) >= 0.75]
+        shown_segs = [s for s in segments if getattr(s, 'confidence', 1.0) >= 0.10]
         if shown_segs:
             for i, seg in enumerate(shown_segs):
                 label = getattr(seg, 'label', '') or getattr(seg, 'asset_class', '') or '?'
@@ -201,7 +232,8 @@ class Dashboard:
         if voice_agent_state:
             listening = voice_agent_state.get('listening', False)
             recording = voice_agent_state.get('recording', False)
-            if listening or recording:
+            last_resp = voice_agent_state.get('last_response', '')
+            if listening or recording or last_resp:
                 cv2.putText(panel, "VOICE AGENT", (8, y), font, 0.4, self._HEADER_COLOR, 1, cv2.LINE_AA)
                 y += 5
                 cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
@@ -217,7 +249,25 @@ class Dashboard:
                 cv2.putText(panel, status, (12, y), font, 0.35, status_color, 1, cv2.LINE_AA)
                 y += 16
 
-                last_resp = voice_agent_state.get('last_response', '')
+                # Show partial transcript while recording
+                if recording:
+                    partial = voice_agent_state.get('partial_transcript', '')
+                    if partial:
+                        max_chars = 28
+                        for i in range(0, len(partial), max_chars):
+                            line = partial[i:i + max_chars]
+                            cv2.putText(panel, f'"{line}"', (12, y), font, 0.3, (150, 255, 150), 1, cv2.LINE_AA)
+                            y += 14
+
+                # Show last command
+                last_cmd = voice_agent_state.get('last_command', '')
+                if last_cmd:
+                    if len(last_cmd) > 25:
+                        last_cmd = last_cmd[:25] + "..."
+                    cv2.putText(panel, f'Cmd: {last_cmd}', (12, y), font, 0.3, (140, 200, 140), 1, cv2.LINE_AA)
+                    y += 14
+
+                # Show last response
                 if last_resp:
                     if len(last_resp) > 25:
                         last_resp = last_resp[:25] + "..."
@@ -314,8 +364,14 @@ class Dashboard:
 
     def _process_key(self, key: int):
         """Handle a single keypress."""
-        if key == 27:  # ESC
+        if key == 27:  # ESC — clear all prompts
+            if self.on_command:
+                self.on_command("clear")
             self._input_text = ""
+        elif key == ord('q') or key == ord('Q'):  # Q — quit
+            self.close()
+            import os
+            os._exit(0)
         elif key == 13:  # Enter
             if self._input_text.strip():
                 cmd = self._input_text.strip()

@@ -514,37 +514,16 @@ class SocialSenseServer:
             self._input_text += chr(key)
 
     def _execute_command(self, raw_cmd: str):
-        """Execute a typed command against the pipeline."""
-        from server.commands import parse_command
-
+        """Execute a typed command through the Gemini NLP pipeline."""
         if self.pipeline is None:
             return
 
-        action, target = parse_command(raw_cmd)
-
-        if action == "blur" and target:
-            self.pipeline.add_prompt(target)  # Tell SAM to segment it
-            self.pipeline.set_effect(target, "blur", 1.0)  # Apply blur effect
-            self._input_log.append(f"blur {target}")
-        elif action == "unblur" and target:
-            self.pipeline.remove_effect(target)  # Remove effect (keep segmenting)
-            self._input_log.append(f"unblur {target}")
-        elif action == "clear":
-            self.pipeline.set_active_prompts(set())
-            self.pipeline.clear_effects()
-            self._input_log.append("cleared all")
-        elif action == "list":
-            active = self.pipeline.get_active_prompts()
-            self._input_log.append(f"active: {', '.join(sorted(active)) or 'none'}")
-        elif action == "help":
-            from server.commands import KNOWN_LABELS
-            self._input_log.append(f"labels: {', '.join(sorted(KNOWN_LABELS))}")
-        else:
-            self._input_log.append(f"? {raw_cmd}")
-
+        self._input_log.append(raw_cmd.strip())
         # Keep log bounded
         if len(self._input_log) > 10:
             self._input_log = self._input_log[-10:]
+
+        self.pipeline.process_text_command(raw_cmd)
 
     # ------------------------------------------------------------------
     # Non-dashboard helpers
@@ -566,42 +545,23 @@ class SocialSenseServer:
             )
 
     def _handle_control(self, msg: pb.ClientMessage):
-        """Handle control commands from the client.
-
-        Supports prompt control: blur/unblur <label>, clear, list, reset.
-        """
-        from server.commands import parse_command
-
+        """Handle control commands from the client via Gemini NLP pipeline."""
         raw = msg.control.command
         logger.info(f"Control command: {raw}")
 
         if self.pipeline is None:
             return
 
-        # "reset" is a pipeline reset (not prompt clear) — check before parse_command
-        # since parse_command maps "reset" to ("clear", None)
+        # "reset" is a pipeline reset (not prompt clear)
         if raw.strip().lower() == "reset":
             self.pipeline.reset()
             return
 
-        action, target = parse_command(raw)
-
-        if action == "blur" and target:
-            self.pipeline.add_prompt(target)
-            self.pipeline.set_effect(target, "blur", 1.0)
-        elif action == "unblur" and target:
-            self.pipeline.remove_effect(target)
-        elif action == "clear":
-            self.pipeline.set_active_prompts(set())
-            self.pipeline.clear_effects()
-        elif action == "list":
-            active = self.pipeline.get_active_prompts()
-            effects = self.pipeline.get_effects()
-            logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
+        self.pipeline.process_text_command(raw)
 
     async def _console_command_loop(self):
         """Read commands from server console — fallback when cv2 window not focused."""
-        from server.commands import parse_command, CommandInput, KNOWN_LABELS, LABEL_ALIASES
+        from server.commands import CommandInput
 
         cmd_input = CommandInput()
         cmd_input.start()
@@ -610,23 +570,6 @@ class SocialSenseServer:
             while True:
                 await asyncio.sleep(0.2)
                 for raw_cmd in cmd_input.get_commands():
-                    action, target = parse_command(raw_cmd)
-                    if action == "blur" and target:
-                        self.pipeline.add_prompt(target)
-                        self.pipeline.set_effect(target, "blur", 1.0)
-                    elif action == "unblur" and target:
-                        self.pipeline.remove_effect(target)
-                    elif action == "clear":
-                        self.pipeline.set_active_prompts(set())
-                        self.pipeline.clear_effects()
-                        logger.info("Cleared all prompts and effects")
-                    elif action == "list":
-                        active = self.pipeline.get_active_prompts()
-                        effects = self.pipeline.get_effects()
-                        logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
-                    elif action == "help":
-                        logger.info(f"Labels: {', '.join(sorted(KNOWN_LABELS))}")
-                        logger.info(f"Aliases: {', '.join(f'{k}->{v}' for k, v in sorted(LABEL_ALIASES.items()))}")
-                        logger.info("Commands: blur <obj>, unblur <obj>, clear, list, help")
+                    self.pipeline.process_text_command(raw_cmd)
         except asyncio.CancelledError:
             cmd_input.stop()

@@ -94,6 +94,7 @@ class PipelineOrchestrator:
                 scene_understanding=self._scene_understanding,
                 config=config,
             )
+            self._voice_agent.set_on_command_callback(self._on_voice_command)
             logger.info("Voice agent pipeline created (will initialize on first frame)")
         else:
             logger.info("Audio disabled — voice agent not created")
@@ -241,22 +242,35 @@ class PipelineOrchestrator:
         for tid in to_remove:
             del self._tracks[tid]
         if to_remove:
-            # Clear cached result so next frame builds fresh segments
-            self._cached_result = None
+            # Replace cached result with empty segments instead of setting to None.
+            # Setting to None would trigger _run_sam_sync_decoded + _start_sam_loop
+            # on the next process_frame, spawning a SECOND SAM loop thread that
+            # shares TRT contexts with the first — causing corruption.
+            if self._cached_result is not None:
+                result = PipelineResult()
+                result.masks_frame_id = self._cached_result.masks_frame_id
+                result.decoder_skipped = True
+                self._cached_result = result
             logger.info(f"Cleared {len(to_remove)} tracks for removed prompts: {labels}")
 
     # ------------------------------------------------------------------
     # Effect registry (typed commands: blur/unblur)
     # ------------------------------------------------------------------
 
-    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0):
-        """Apply an effect to a label (e.g., blur laptop)."""
+    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0, invert: bool = False):
+        """Apply an effect to a label (e.g., blur laptop).
+
+        If invert=True, SAM3 segments the target but the effect applies to
+        everything OUTSIDE the mask (e.g., "blur everything but laptop").
+        """
         with self._effect_lock:
             self._effect_registry[label] = {
                 "type": effect_type,
                 "intensity": min(1.0, max(0.0, intensity)),
+                "invert": invert,
             }
-        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f})")
+        mode = " (inverted)" if invert else ""
+        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f}){mode}")
 
     def remove_effect(self, label: str):
         """Remove effect from a label."""
@@ -317,8 +331,9 @@ class PipelineOrchestrator:
                 f"Frame {frame_id}: {result.total_ms:.0f}ms (first) | "
                 f"SAM={result.fastsam_ms:.0f}ms | {len(result.segments)} segs"
             )
-            # Start continuous SAM loop
-            self._start_sam_loop()
+            # Start continuous SAM loop (guard against duplicate threads)
+            if self._sam_thread is None or not self._sam_thread.is_alive():
+                self._start_sam_loop()
             return result
 
         # Return cached result (<0.1ms)
@@ -484,6 +499,18 @@ class PipelineOrchestrator:
                 total_ms = (time.perf_counter() - t0) * 1000
                 self._sam_total_ms_accum += total_ms
                 self._sam_ms_accum += sam_ms
+
+                # Frequent centroid log (every 30 iters ~4s) to diagnose mask movement
+                if self._sam_count % 30 == 0 and self._sam_count > 0:
+                    centroid_info = [(t.track_id, t.label,
+                                      f"cx={t.center_x:.3f}", f"cy={t.center_y:.3f}",
+                                      f"rle={len(t.rle_mask) if t.rle_mask else 0}B")
+                                     for t in tracked]
+                    logger.info(
+                        f"SAM #{self._sam_count} mask-diag: {len(tracked)} segs | "
+                        f"fid={sam_frame_id} | centroids={centroid_info}"
+                    )
+
                 if self._sam_count % 120 == 0 and self._sam_count > 0:
                     avg_total = self._sam_total_ms_accum / 120
                     avg_sam = self._sam_ms_accum / 120
@@ -801,9 +828,13 @@ class PipelineOrchestrator:
         for seg in segments:
             if seg.label and seg.label in active_effects:
                 fx = active_effects[seg.label]
+                params = {}
+                if fx.get("invert", False):
+                    params["invert"] = "true"
                 seg.effect = EffectData(
                     effect_type=fx.get("type", "none"),
                     intensity=fx.get("intensity", 1.0),
+                    params=params,
                 )
 
     # ------------------------------------------------------------------
@@ -828,3 +859,64 @@ class PipelineOrchestrator:
             base_state.update(voice_state)
 
         return base_state
+
+    def process_text_command(self, text: str):
+        """Process a typed command.
+
+        Simple commands (clear, reset, list) are handled instantly.
+        Everything else goes through Gemini NLP via the voice agent.
+        """
+        text = text.strip()
+        if not text:
+            return
+
+        text_lower = text.lower()
+
+        # Instant commands — no LLM needed, zero latency
+        if text_lower in ("clear", "clearall", "reset"):
+            self.set_active_prompts(set())
+            self.clear_effects()
+            logger.info("Cleared all prompts and effects")
+            return
+        if text_lower in ("list", "ls", "show", "status"):
+            active = self.get_active_prompts()
+            effects = self.get_effects()
+            logger.info(f"Active prompts: {sorted(active)}, effects: {effects}")
+            return
+
+        # Everything else → Gemini NLP
+        if self._voice_agent is not None:
+            self._voice_agent.process_text_command(text)
+        else:
+            # Voice agent unavailable — direct prompt add as last resort
+            # (no regex parsing — just treat the whole text as a label)
+            self.add_prompt(text_lower)
+            self.set_effect(text_lower, "blur", 1.0)
+            logger.info(f"No voice agent — direct prompt: {text_lower}")
+
+    def _on_voice_command(self, action: str, targets: list[str], effect_type: str, intensity: float, invert: bool = False):
+        """Callback from VoiceAgent: sync SAM3 prompts with voice commands.
+
+        Per spec: "We should always leave requested objects within the array" —
+        prompts persist even after effect removal so SAM3 keeps segmenting them.
+
+        If invert=True, SAM3 segments the targets but the effect applies to
+        everything OUTSIDE those masks (e.g., "blur everything but laptop").
+        """
+        if action in ("add", "change"):
+            for target in targets:
+                self.add_prompt(target)
+                self.set_effect(target, effect_type, intensity, invert=invert)
+            mode = " (inverted)" if invert else ""
+            logger.info(f"Voice → SAM3: add prompts {targets} with {effect_type}@{intensity}{mode}")
+        elif action == "remove":
+            if not targets:
+                # "clear" command — remove ALL prompts and effects
+                self.set_active_prompts(set())
+                self.clear_effects()
+                logger.info("Voice → SAM3: cleared all prompts and effects")
+            else:
+                for target in targets:
+                    self.remove_effect(target)
+                    self.remove_prompt(target)
+                logger.info(f"Voice → SAM3: removed prompts + effects for {targets}")

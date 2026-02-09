@@ -27,7 +27,7 @@ class GeminiSceneUnderstanding:
     Caches results for a short TTL to avoid redundant calls during a single request.
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash-exp", cache_ttl: float = 10.0):
+    def __init__(self, api_key: str = None, model: str = "gemini-2.0-flash", cache_ttl: float = 10.0):
         self._api_key = api_key
         self._model = model
         self._cache_ttl = cache_ttl
