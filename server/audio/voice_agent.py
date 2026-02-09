@@ -22,6 +22,8 @@ from typing import Optional
 from dataclasses import dataclass
 import numpy as np
 
+from server.config import EFFECT_TYPES
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,9 +192,9 @@ class VoiceCommandPlanner:
     - Full-screen filters ("dim everything")
     """
 
-    def __init__(self, api_key: str = None, model: str = "gemini-2.5-flash-lite"):
+    def __init__(self, api_key: str = None, model: str = None):
         self._api_key = api_key
-        self._model = model
+        self._model = model or "gemini-2.5-flash-lite"
         self._client = None
         self._available = False
 
@@ -216,8 +218,9 @@ class VoiceCommandPlanner:
     def available(self) -> bool:
         return self._available
 
-    # --- Fast-path regex patterns (compiled once) ---
-    _EFFECTS = r'blur|pixelate|dim|highlight|outline'
+    # --- Fast-path regex patterns (built from EFFECT_TYPES) ---
+    _EFFECTS = '|'.join(EFFECT_TYPES)  # "blur|dim|pixelate|highlight|outline"
+    # Gerund/variant forms for "stop blurring", "remove dimming", etc.
     _EFFECTS_GERUND = (
         r'blur(?:ring)?|pixelat(?:e|ing)|dim(?:ming)?|highlight(?:ing)?|outlin(?:e|ing)'
     )
@@ -384,7 +387,7 @@ Context:
 
 Output JSON with these fields:
 - "targets": list of object labels. ALWAYS include any object the user names, even if not in the known set. SAM3 will search for it.
-- "effect_type": "blur" | "dim" | "pixelate" | "highlight" | "outline"
+- "effect_type": {' | '.join(f'"{e}"' for e in EFFECT_TYPES)}
 - "intensity": 0.0-1.0 (default 0.8)
 - "action": "add" | "remove" | "change"
 - "invert": true if effect applies to everything EXCEPT targets (e.g. "blur everything but laptop")
@@ -523,8 +526,12 @@ class VoiceAgent:
         self._scene = scene_understanding
         self._config = config
 
-        self._wake_gate = WakeWordGate()
-        self._assembler = UtteranceAssembler()
+        self._wake_gate = WakeWordGate(
+            window_size=getattr(config, 'voice_wake_window', 3),
+        )
+        self._assembler = UtteranceAssembler(
+            timeout=getattr(config, 'voice_assembler_timeout', 4.5),
+        )
 
         # Audio buffer
         self._audio_buffer = bytearray()
@@ -591,24 +598,21 @@ class VoiceAgent:
         self._text_thread.start()
         logger.info("VoiceAgent started (audio + text threads)")
 
-    # Audio pipeline tuning
-    _SILENCE_RMS_THRESHOLD = 150   # Was 300 — lower to catch quiet speech
-    _LISTENING_CHUNK_S = 3.0       # 3s chunks — Whisper needs context for accuracy
-    _RECORDING_CHUNK_S = 3.0       # 3s chunks for accurate command transcription
-
     def ingest_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
         """Called from websocket thread to feed audio data.
 
         Buffers audio and emits chunks for background transcription.
-        Uses 1s chunks during listening (fast wake word) and 2s during recording (accurate).
         No stale chunk dropping — local transcription is cheap.
         """
         with self._buffer_lock:
             self._audio_buffer.extend(pcm16_data)
             self._sample_rate = sample_rate
 
-            # Dynamic chunk size: shorter during listening for fast wake word detection
-            chunk_s = self._RECORDING_CHUNK_S if self._assembler.is_active else self._LISTENING_CHUNK_S
+            # Dynamic chunk size based on phase
+            chunk_s = (
+                self._config.voice_recording_chunk_s if self._assembler.is_active
+                else self._config.voice_listening_chunk_s
+            )
             min_bytes = int(sample_rate * chunk_s * 2)  # 2 bytes per PCM16 sample
 
             # Process all complete chunks (no dropping)
@@ -619,7 +623,7 @@ class VoiceAgent:
                 # Energy gate: skip silence
                 samples = np.frombuffer(chunk_bytes, dtype=np.int16)
                 rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
-                if rms < self._SILENCE_RMS_THRESHOLD:
+                if rms < self._config.voice_energy_threshold:
                     continue  # silence, skip
 
                 # No stale chunk dropping — local transcription is fast and free

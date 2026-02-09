@@ -46,11 +46,13 @@ class Dashboard:
         on_command: Optional[Callable[[str], None]] = None,
         get_active_prompts: Optional[Callable[[], set]] = None,
         get_effects: Optional[Callable[[], dict]] = None,
+        confidence_min: float = 0.10,
     ):
         self.window_name = window_name
         self.on_command = on_command
         self.get_active_prompts = get_active_prompts or (lambda: set())
         self.get_effects = get_effects or (lambda: {})
+        self._confidence_min = confidence_min
 
         self._input_text = ""
         self._input_log: list[str] = []
@@ -116,7 +118,7 @@ class Dashboard:
         # --- Draw mask overlays ---
         for i, seg in enumerate(segments):
             conf = getattr(seg, 'confidence', 1.0)
-            if conf < 0.10:
+            if conf < self._confidence_min:
                 continue
 
             rle_mask = getattr(seg, 'rle_mask', None)
@@ -249,7 +251,7 @@ class Dashboard:
         cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
         y += 18
 
-        shown_segs = [s for s in segments if getattr(s, 'confidence', 1.0) >= 0.10]
+        shown_segs = [s for s in segments if getattr(s, 'confidence', 1.0) >= self._confidence_min]
         if shown_segs:
             for i, seg in enumerate(shown_segs):
                 label = getattr(seg, 'label', '') or getattr(seg, 'asset_class', '') or '?'

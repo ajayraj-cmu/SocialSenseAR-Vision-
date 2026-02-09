@@ -81,12 +81,12 @@ class PipelineOrchestrator:
             from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
 
             # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
-            backend = getattr(config, 'transcriber_backend', 'local')
-            if backend == "local":
+            if config.transcriber_backend == "local":
                 from server.audio.local_transcriber import LocalTranscriber
                 self._transcriber = LocalTranscriber(
-                    listening_model=getattr(config, 'whisper_listening_model', 'medium.en'),
-                    recording_model=getattr(config, 'whisper_recording_model', 'medium.en'),
+                    listening_model=config.whisper_listening_model,
+                    recording_model=config.whisper_recording_model,
+                    beam_size=config.whisper_beam_size,
                 )
                 logger.info("Transcriber: local (faster-whisper)")
             else:
@@ -97,8 +97,14 @@ class PipelineOrchestrator:
                 )
                 logger.info("Transcriber: cloud (OpenAI Whisper)")
 
-            self._voice_planner = VoiceCommandPlanner(api_key=config.gemini_api_key)
-            self._scene_understanding = GeminiSceneUnderstanding(api_key=config.gemini_api_key)
+            self._voice_planner = VoiceCommandPlanner(
+                api_key=config.gemini_api_key,
+                model=config.gemini_planning_model,
+            )
+            self._scene_understanding = GeminiSceneUnderstanding(
+                api_key=config.gemini_api_key,
+                model=config.gemini_model,
+            )
 
             self._voice_agent = VoiceAgent(
                 transcriber=self._transcriber,
@@ -122,14 +128,14 @@ class PipelineOrchestrator:
         self._sam_total_ms_accum = 0.0
         self._sam_ms_accum = 0.0
 
-        # --- Gemini labeling (background, every 2s) ---
-        self._gemini_interval = 2.0
+        # --- Gemini labeling (background) ---
+        self._gemini_interval = config.gemini_labeling_interval
         self._last_gemini_time = 0.0
 
         # --- Tracked masks (position-based matching, no velocity) ---
         self._tracks: dict[str, dict] = {}
         self._next_track_id = 0
-        self._track_max_age = 1.0  # seconds — tracks expire 1s after last match
+        self._track_max_age = config.track_max_age
 
         # --- Cached output (returned on every frame) ---
         self._cached_result: PipelineResult | None = None
@@ -562,9 +568,10 @@ class PipelineOrchestrator:
     # ------------------------------------------------------------------
 
     def _encode_rle_all(self, segments: list, fw: int, fh: int):
-        """Encode all segment masks to RLE at 3/4 resolution with smooth edges."""
-        rle_w = int(fw * 0.75)
-        rle_h = int(fh * 0.75)
+        """Encode all segment masks to RLE at reduced resolution with smooth edges."""
+        scale = self.config.rle_scale
+        rle_w = int(fw * scale)
+        rle_h = int(fh * scale)
         for seg in segments:
             if seg.mask is not None:
                 mask = seg.mask
@@ -619,7 +626,7 @@ class PipelineOrchestrator:
                 for cost, si, ti in pairs:
                     if si in matched_s or ti in matched_t:
                         continue
-                    if cost > 0.20:  # Slightly more lenient for Gemini (async, positions shift)
+                    if cost > self.config.gemini_label_match_cost:
                         break
                     tid = track_ids[ti]
                     seg = valid_segs[si]
@@ -706,7 +713,7 @@ class PipelineOrchestrator:
                     dist = (dx * dx + dy * dy) ** 0.5
 
                     # Skip obviously impossible matches early
-                    if dist > 0.25:
+                    if dist > self.config.track_match_skip_dist:
                         continue
 
                     # Area similarity (for ranking only — not gating)
@@ -728,7 +735,7 @@ class PipelineOrchestrator:
 
             # Sort by cost (lowest first) and greedily assign
             pairs.sort()
-            max_dist = 0.20  # Gate on raw distance — 20% of frame diagonal
+            max_dist = self.config.track_match_max_dist
 
             for cost, dist, si, ti in pairs:
                 if si in matched_seg_indices or ti in matched_track_ids:

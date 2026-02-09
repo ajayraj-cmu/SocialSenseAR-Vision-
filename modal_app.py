@@ -25,45 +25,8 @@ from typing import Optional
 
 import modal
 
-# Import configuration
-try:
-    import modal_config as config
-except ImportError:
-    class config:
-        APP_NAME = "socialsense-ar-gpu"
-        GPU_TYPE = "A10G"
-        CACHE_VOLUME_NAME = "socialsense-cache"
-        SECRET_NAME = "socialsense-secrets"
-        CONTAINER_TIMEOUT = 600
-        PYTHON_VERSION = "3.12"
-        TORCH_VERSION = "2.5.1"
-        TORCHVISION_VERSION = "0.20.1"
-        CUDA_VERSION = "cu121"
-        SAM3_MODEL = "facebook/sam3"
-        SAM3_RESOLUTION = 1008
-        SAM3_PROMPTS_PER_FRAME = 1
-        SAM3_CACHE_TTL = 4.0
-        SAM3_CONFIDENCE_THRESHOLD = 0.12
-        AUDIO_ENABLED = False
-        DEBUG_VIEW = False
-        METRICS_LOG_PATH = None
-        GEMINI_MODEL = "gemini-2.5-flash"
-        TRANSCRIBER_BACKEND = "local"
-        WHISPER_LISTENING_MODEL = "tiny.en"
-        WHISPER_RECORDING_MODEL = "base.en"
-        CACHE_MOUNT_PATH = "/cache"
-
-        @staticmethod
-        def get_app_name():
-            return "socialsense-ar-gpu"
-
-        @staticmethod
-        def get_cache_volume_name():
-            return "socialsense-cache"
-
-        @staticmethod
-        def get_gpu_spec():
-            return "A10G"
+# Modal infra config (GPU, volumes, secrets, TRT)
+import modal_config as config
 
 # ============================================================
 # Modal App + Volume + Secrets
@@ -195,48 +158,18 @@ class SocialSenseGPU:
             if not copied:
                 logger.info(f"No TRT engines found ({trt_search_dirs}) — using PyTorch fallback")
 
-        try:
-            from modal_config import (
-                SAM3_MODEL, SAM3_RESOLUTION, SAM3_PROMPTS_PER_FRAME,
-                SAM3_CACHE_TTL, SAM3_CONFIDENCE_THRESHOLD,
-                AUDIO_ENABLED, DEBUG_VIEW, METRICS_LOG_PATH, GEMINI_MODEL,
-                TRANSCRIBER_BACKEND, WHISPER_LISTENING_MODEL, WHISPER_RECORDING_MODEL,
-            )
-        except ImportError:
-            SAM3_MODEL = "facebook/sam3"
-            SAM3_RESOLUTION = 1008
-            SAM3_PROMPTS_PER_FRAME = 1
-            SAM3_CACHE_TTL = 4.0
-            SAM3_CONFIDENCE_THRESHOLD = 0.12
-            AUDIO_ENABLED = False
-            DEBUG_VIEW = False
-            METRICS_LOG_PATH = None
-            GEMINI_MODEL = "gemini-2.5-flash"
-            TRANSCRIBER_BACKEND = "local"
-            WHISPER_LISTENING_MODEL = "tiny.en"
-            WHISPER_RECORDING_MODEL = "base.en"
-
+        # ServerConfig defaults are the single source of truth.
+        # Only override Modal-specific values (device, debug, API keys, metrics path).
         self.server_config = ServerConfig(
             device="cuda",
             gpu_id=0,
-            pipeline_mode="sam3",
-            sam3_model=SAM3_MODEL,
-            sam3_resolution=SAM3_RESOLUTION,
-            sam3_prompts_per_frame=SAM3_PROMPTS_PER_FRAME,
-            sam3_cache_ttl=SAM3_CACHE_TTL,
-            sam3_confidence_threshold=SAM3_CONFIDENCE_THRESHOLD,
-            gemini_model=GEMINI_MODEL,
             debug_view=False,  # Never GUI in Modal
-            audio_enabled=AUDIO_ENABLED,
-            metrics_log_path=METRICS_LOG_PATH,
-            transcriber_backend=TRANSCRIBER_BACKEND,
-            whisper_listening_model=WHISPER_LISTENING_MODEL,
-            whisper_recording_model=WHISPER_RECORDING_MODEL,
+            metrics_log_path=config.METRICS_LOG_PATH,
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
         )
 
-        logger.info(f"Pipeline: sam3 | GPU: cuda | SAM3: {SAM3_MODEL}")
+        logger.info(f"Pipeline: sam3 | GPU: cuda | SAM3: {self.server_config.sam3_model}")
         logger.info(f"HF_TOKEN: {'SET' if os.getenv('HF_TOKEN') else 'MISSING'}")
 
         logger.info("Loading SAM3 model (this takes ~60-90s on cold start)...")

@@ -1,7 +1,10 @@
-"""Server configuration."""
+"""Server configuration — single source of truth for all runtime defaults."""
 import os
 from dataclasses import dataclass
 from typing import Optional
+
+# Valid effect types (used by voice agent, dashboard, websocket server)
+EFFECT_TYPES = ("blur", "dim", "pixelate", "highlight", "outline")
 
 
 @dataclass
@@ -31,6 +34,17 @@ class ServerConfig:
     sam3_cache_ttl: float = 4.0          # mask cache lifetime — must outlast full rotation
     sam3_confidence_threshold: float = 0.12
 
+    # Tracking & matching
+    track_max_age: float = 1.0           # seconds before unmatched tracks expire
+    track_match_max_dist: float = 0.20   # max centroid distance (fraction of frame diagonal)
+    track_match_skip_dist: float = 0.25  # skip obviously impossible matches above this
+    gemini_label_match_cost: float = 0.20  # max cost for Gemini label→track matching
+    rle_scale: float = 0.75             # RLE encoding downscale factor (0.75 = 3/4 resolution)
+
+    # Display confidence thresholds
+    display_confidence_min: float = 0.75   # min confidence for client-side segment rendering
+    dashboard_confidence_min: float = 0.10 # min confidence for debug dashboard display
+
     # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
     fastsam_conf: float = 0.50           # higher = fewer fragments on textured objects (paintings/screens)
@@ -44,7 +58,9 @@ class ServerConfig:
 
     # Gemini Vision
     gemini_model: str = "gemini-2.5-flash"
-    gemini_min_interval: float = 6.0    # seconds between API calls
+    gemini_planning_model: str = "gemini-2.5-flash-lite"  # Fast model for voice command parsing
+    gemini_min_interval: float = 6.0    # seconds between scene understanding API calls
+    gemini_labeling_interval: float = 2.0  # seconds between Gemini labeling runs (legacy mode)
     gemini_max_calls_per_minute: int = 5
     gemini_label_cache_ttl: float = 30.0  # seconds
 
@@ -61,10 +77,13 @@ class ServerConfig:
     audio_enabled: bool = True
     transcriber_backend: str = "local"    # "local" (faster-whisper) or "cloud" (OpenAI Whisper API)
     whisper_model: str = "whisper-1"      # Cloud Whisper model (when backend="cloud")
-    whisper_listening_model: str = "tiny.en"   # Local fast model for wake word detection
-    whisper_recording_model: str = "base.en"   # Local accurate model for command transcription
+    whisper_listening_model: str = "medium.en"
+    whisper_recording_model: str = "medium.en"
+    whisper_beam_size: int = 5            # Beam search width (higher = more accurate, slower)
     voice_energy_threshold: int = 150     # RMS silence threshold (PCM16)
-    voice_listening_chunk_s: float = 1.0  # Chunk duration during listening phase
+    voice_listening_chunk_s: float = 3.0  # Chunk duration during listening phase
+    voice_recording_chunk_s: float = 3.0  # Chunk duration during recording phase
+    voice_assembler_timeout: float = 4.5  # Silence timeout before utterance auto-fires
     voice_wake_window: int = 3            # Sliding window size for wake word detection
 
     # OpenAI

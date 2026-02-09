@@ -25,12 +25,14 @@ class LocalTranscriber:
 
     def __init__(
         self,
-        listening_model: str = "medium.en",
-        recording_model: str = "medium.en",
+        listening_model: str,
+        recording_model: str,
+        beam_size: int = 5,
         device: str = "auto",
     ):
         self._listening_model_name = listening_model
         self._recording_model_name = recording_model
+        self._beam_size = beam_size
         self._device = device
         self._listening_model = None
         self._recording_model = None
@@ -132,7 +134,7 @@ class LocalTranscriber:
             segments, info = model.transcribe(
                 samples,
                 language="en",
-                beam_size=5,
+                beam_size=self._beam_size,
                 initial_prompt=self.INITIAL_PROMPT,
                 hotwords="vibe blur pixelate dim person laptop phone screen clear",
                 vad_filter=False,  # We have our own energy gate — don't let VAD discard speech

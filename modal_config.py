@@ -1,7 +1,7 @@
 """Modal Deployment Configuration
 
-Central configuration for Modal GPU deployment.
-Modify these settings to customize your deployment.
+Modal-specific infrastructure settings only.
+All runtime/model config lives in server/config.py (single source of truth).
 """
 
 import os
@@ -25,25 +25,9 @@ GPU_COUNT = 1
 # Container timeout (seconds) - max time before idle shutdown
 CONTAINER_TIMEOUT = 600  # 10 minutes
 
-# Scaledown window (seconds) - time before scaling to zero (renamed from container_idle_timeout)
+# Scaledown window (seconds) - time before scaling to zero
 SCALEDOWN_WINDOW = 60  # 1 minute
 CONTAINER_IDLE_TIMEOUT = SCALEDOWN_WINDOW  # Backwards compatibility
-
-# ============================================================
-# Model Configuration
-# ============================================================
-
-# SAM3 configuration
-SAM3_MODEL = "facebook/sam3"
-SAM3_RESOLUTION = 1008  # Must match TRT engine if using TRT (1008 or 784)
-SAM3_PROMPTS_PER_FRAME = 1  # How many prompts to decode per frame
-SAM3_CACHE_TTL = 4.0  # Mask cache lifetime (seconds)
-SAM3_CONFIDENCE_THRESHOLD = 0.12  # Minimum confidence for mask
-
-# Gemini configuration
-GEMINI_MODEL = "gemini-2.5-flash"  # Fast + accurate for scene understanding
-GEMINI_MIN_INTERVAL = 6.0  # Min seconds between API calls
-GEMINI_CACHE_TTL = 30.0  # Scene cache lifetime
 
 # ============================================================
 # Volume Configuration
@@ -65,24 +49,6 @@ CACHE_MOUNT_PATH = "/cache"
 # - GEMINI_API_KEY or GOOGLE_API_KEY: For scene understanding
 # - HF_TOKEN: For gated HuggingFace models (facebook/sam3)
 SECRET_NAME = "socialsense-secrets"
-
-# ============================================================
-# Feature Flags
-# ============================================================
-
-# Enable audio processing (voice agent)
-AUDIO_ENABLED = True  # Server-side voice agent pipeline (wake word + local Whisper + Gemini)
-
-# Transcriber: "local" (faster-whisper, recommended) or "cloud" (OpenAI Whisper API)
-TRANSCRIBER_BACKEND = "local"
-WHISPER_LISTENING_MODEL = "tiny.en"    # Fast model for wake word detection
-WHISPER_RECORDING_MODEL = "base.en"    # Accurate model for command transcription
-
-# Enable debug view (OpenCV window) - only works in modal serve
-DEBUG_VIEW = False
-
-# Enable metrics logging
-METRICS_LOG_PATH = None  # Set to a path to enable JSONL metrics
 
 # ============================================================
 # Container Image Configuration
@@ -122,17 +88,12 @@ APP_NAME = "socialsense-ar-gpu"
 # Set via MODAL_ENV=staging or MODAL_ENV=prod
 ENVIRONMENT = os.environ.get("MODAL_ENV", "prod")
 
+# Metrics log path (Modal volume path, or None)
+METRICS_LOG_PATH = None
+
 # ============================================================
 # Advanced: TensorRT Engine Configuration
 # ============================================================
-
-# If you have pre-built TensorRT engines, they will be auto-detected
-# based on SAM3_RESOLUTION. Put them in project root with these names:
-# - sam3_vision_int8_{resolution}.engine (preferred, INT8 quantized)
-# - sam3_vision_{resolution}.engine (FP16 fallback)
-# - sam3_topk_decoder_{resolution}.engine (top-k decoder, recommended)
-# - sam3_decoder_{resolution}.engine (full decoder, slower)
-# - sam3_meta_{resolution}.json (metadata for TRT engines)
 
 # TRT engines are built on Modal GPU and stored on the cache volume.
 # At container startup, modal_app.py copies them to /root/ for auto-detection.
@@ -169,20 +130,14 @@ def validate_config():
     """Validate configuration and warn about common issues."""
     issues = []
 
-    # Check GPU type
     valid_gpus = ["A10G", "A100", "A100-80GB", "L4", "T4", "H100"]
     if GPU_TYPE not in valid_gpus:
         issues.append(f"Unknown GPU_TYPE '{GPU_TYPE}'. Valid: {valid_gpus}")
 
-    # Warn about suboptimal choices
     if GPU_TYPE == "T4":
         issues.append("WARNING: T4 has only 16GB VRAM. SAM3 may fail with OOM. Recommend A10G or L4.")
     if GPU_TYPE in ["A100-80GB", "H100"]:
         issues.append(f"WARNING: {GPU_TYPE} is overkill for SAM3 (~$4-8/hr). A10G is recommended.")
-
-    # Check resolution
-    if SAM3_RESOLUTION not in [784, 1008]:
-        issues.append(f"WARNING: SAM3_RESOLUTION {SAM3_RESOLUTION} is non-standard. Use 1008 or 784.")
 
     return issues
 

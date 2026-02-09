@@ -294,7 +294,7 @@ class SocialSenseServer:
         for i, seg in enumerate(response.segments):
             if not seg.rle_mask or seg.mask_width <= 0 or seg.mask_height <= 0:
                 continue
-            if seg.confidence < 0.75:
+            if seg.confidence < self.config.display_confidence_min:
                 continue
             mask = decode_rle(seg.rle_mask, seg.mask_width, seg.mask_height)
             if mask.shape[:2] != (fh, fw):
@@ -372,7 +372,7 @@ class SocialSenseServer:
         cv2.line(panel, (8, y), (pw - 8, y), (60, 60, 60), 1)
         y += 18
 
-        shown_segs = [s for s in response.segments if s.confidence >= 0.75]
+        shown_segs = [s for s in response.segments if s.confidence >= self.config.display_confidence_min]
         if shown_segs:
             for i, seg in enumerate(shown_segs):
                 label = seg.label or seg.asset_class or "?"
