@@ -234,6 +234,13 @@ class SocialSenseServer:
                 response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
                 response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
 
+            # Audio response from PersonaPlex (if available)
+            if hasattr(self.pipeline._voice_agent, 'get_audio_response'):
+                audio_data = self.pipeline._voice_agent.get_audio_response()
+                if audio_data:
+                    response.conversation.voice_agent.audio_response_pcm16 = audio_data
+                    response.conversation.voice_agent.audio_sample_rate = 16000
+
         # Metrics — report honest wall-clock time
         proto_ms = (time.perf_counter() - t0) * 1000
         wall_ms = (time.perf_counter() - t_wall) * 1000

@@ -92,6 +92,15 @@ ENVIRONMENT = os.environ.get("MODAL_ENV", "prod")
 METRICS_LOG_PATH = None
 
 # ============================================================
+# PersonaPlex Configuration
+# ============================================================
+
+# PersonaPlex service URL (set after deploying personaplex/deploy_modal.py)
+# Add PERSONAPLEX_URL to Modal secret 'socialsense-secrets' to enable.
+# When empty/unset, PersonaPlex is disabled and the legacy voice agent is used.
+PERSONAPLEX_URL = os.environ.get("PERSONAPLEX_URL", "")
+
+# ============================================================
 # Advanced: TensorRT Engine Configuration
 # ============================================================
 

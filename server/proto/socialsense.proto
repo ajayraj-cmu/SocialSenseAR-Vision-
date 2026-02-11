@@ -147,6 +147,10 @@ message VoiceAgentState {
 
   // Active full-screen filter (applied globally, not per-object)
   FullScreenFilter full_screen_filter = 10;
+
+  // Audio response from PersonaPlex (PCM16 mono, forwarded to Unity for playback)
+  bytes audio_response_pcm16 = 11;
+  uint32 audio_sample_rate = 12;  // sample rate of audio response (e.g., 16000)
 }
 
 message FullScreenFilter {

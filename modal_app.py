@@ -73,6 +73,8 @@ image = (
         "openai>=1.0.0",
         "webrtcvad>=2.0.10",
         "mediapipe>=0.10.0",
+        "sphn>=0.1.4,<0.2",
+        "aiohttp>=3.10.5",
         "fastapi[standard]>=0.115.0",
         "uvicorn>=0.32.0",
         "tensorrt-cu12>=10.0",
@@ -160,6 +162,7 @@ class SocialSenseGPU:
 
         # ServerConfig defaults are the single source of truth.
         # Only override Modal-specific values (device, debug, API keys, metrics path).
+        personaplex_url = os.getenv("PERSONAPLEX_URL", "")
         self.server_config = ServerConfig(
             device="cuda",
             gpu_id=0,
@@ -167,6 +170,8 @@ class SocialSenseGPU:
             metrics_log_path=config.METRICS_LOG_PATH,
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
+            personaplex_enabled=bool(personaplex_url),
+            personaplex_url=personaplex_url or "ws://localhost:8998/api/chat",
         )
 
         logger.info(f"Pipeline: sam3 | GPU: cuda | SAM3: {self.server_config.sam3_model}")
@@ -321,6 +326,13 @@ class SocialSenseGPU:
                             if fs_filter:
                                 response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
                                 response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
+
+                            # Audio response from PersonaPlex (if available)
+                            if hasattr(self.pipeline._voice_agent, 'get_audio_response'):
+                                audio_data = self.pipeline._voice_agent.get_audio_response()
+                                if audio_data:
+                                    response.conversation.voice_agent.audio_response_pcm16 = audio_data
+                                    response.conversation.voice_agent.audio_sample_rate = 16000
 
                         response.metrics.total_ms = proc_ms
                         response.metrics.segment_count = len(response.segments)

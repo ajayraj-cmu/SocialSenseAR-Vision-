@@ -76,44 +76,72 @@ class PipelineOrchestrator:
 
         # Audio / Voice Agent components
         self._voice_agent = None
+        self._personaplex_bridge = None
+        self._transcriber = None
+        self._voice_planner = None
+        self._scene_understanding = None
+
         if config.audio_enabled:
-            from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
-            from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
-
-            # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
-            if config.transcriber_backend == "local":
-                from server.audio.local_transcriber import LocalTranscriber
-                self._transcriber = LocalTranscriber(
-                    listening_model=config.whisper_listening_model,
-                    recording_model=config.whisper_recording_model,
-                    beam_size=config.whisper_beam_size,
+            if getattr(config, 'personaplex_enabled', False):
+                # PersonaPlex speech-to-speech voice agent
+                from server.audio.personaplex_bridge import PersonaPlexBridge
+                from server.audio.personaplex_voice_agent import (
+                    PersonaPlexVoiceAgent, PERSONAPLEX_SYSTEM_PROMPT,
                 )
-                logger.info("Transcriber: local (faster-whisper)")
+
+                self._personaplex_bridge = PersonaPlexBridge(
+                    url=config.personaplex_url,
+                    text_prompt=PERSONAPLEX_SYSTEM_PROMPT,
+                    voice_prompt=config.personaplex_voice_prompt,
+                    text_temperature=config.personaplex_text_temperature,
+                    text_topk=config.personaplex_text_topk,
+                    audio_temperature=config.personaplex_audio_temperature,
+                    audio_topk=config.personaplex_audio_topk,
+                )
+                self._voice_agent = PersonaPlexVoiceAgent(
+                    self._personaplex_bridge, config,
+                )
+                self._voice_agent.set_on_command_callback(self._on_voice_command)
+                logger.info("PersonaPlex voice agent created (will connect on first frame)")
             else:
-                from server.audio.transcriber import WhisperTranscriber
-                self._transcriber = WhisperTranscriber(
-                    api_key=config.openai_api_key,
-                    model=config.whisper_model,
+                # Existing faster-whisper + Gemini voice agent (fallback)
+                from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
+                from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
+
+                # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
+                if config.transcriber_backend == "local":
+                    from server.audio.local_transcriber import LocalTranscriber
+                    self._transcriber = LocalTranscriber(
+                        listening_model=config.whisper_listening_model,
+                        recording_model=config.whisper_recording_model,
+                        beam_size=config.whisper_beam_size,
+                    )
+                    logger.info("Transcriber: local (faster-whisper)")
+                else:
+                    from server.audio.transcriber import WhisperTranscriber
+                    self._transcriber = WhisperTranscriber(
+                        api_key=config.openai_api_key,
+                        model=config.whisper_model,
+                    )
+                    logger.info("Transcriber: cloud (OpenAI Whisper)")
+
+                self._voice_planner = VoiceCommandPlanner(
+                    api_key=config.gemini_api_key,
+                    model=config.gemini_planning_model,
                 )
-                logger.info("Transcriber: cloud (OpenAI Whisper)")
+                self._scene_understanding = GeminiSceneUnderstanding(
+                    api_key=config.gemini_api_key,
+                    model=config.gemini_model,
+                )
 
-            self._voice_planner = VoiceCommandPlanner(
-                api_key=config.gemini_api_key,
-                model=config.gemini_planning_model,
-            )
-            self._scene_understanding = GeminiSceneUnderstanding(
-                api_key=config.gemini_api_key,
-                model=config.gemini_model,
-            )
-
-            self._voice_agent = VoiceAgent(
-                transcriber=self._transcriber,
-                planner=self._voice_planner,
-                scene_understanding=self._scene_understanding,
-                config=config,
-            )
-            self._voice_agent.set_on_command_callback(self._on_voice_command)
-            logger.info("Voice agent pipeline created (will initialize on first frame)")
+                self._voice_agent = VoiceAgent(
+                    transcriber=self._transcriber,
+                    planner=self._voice_planner,
+                    scene_understanding=self._scene_understanding,
+                    config=config,
+                )
+                self._voice_agent.set_on_command_callback(self._on_voice_command)
+                logger.info("Voice agent pipeline created (will initialize on first frame)")
         else:
             logger.info("Audio disabled — voice agent not created")
 
@@ -191,12 +219,19 @@ class PipelineOrchestrator:
 
         # Initialize voice agent components
         if self._voice_agent is not None:
-            self._transcriber.initialize()
-            self._voice_planner.initialize()
-            self._scene_understanding.initialize()
-            self._voice_agent.start()
-            t_voice = time.perf_counter()
-            logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+            if self._personaplex_bridge is not None:
+                # PersonaPlex: just start the bridge (connects async)
+                self._voice_agent.start()
+                t_voice = time.perf_counter()
+                logger.info(f"  PersonaPlex voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+            else:
+                # Legacy: initialize transcriber, planner, scene understanding
+                self._transcriber.initialize()
+                self._voice_planner.initialize()
+                self._scene_understanding.initialize()
+                self._voice_agent.start()
+                t_voice = time.perf_counter()
+                logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
         else:
             t_voice = t_lbl
 
@@ -222,9 +257,12 @@ class PipelineOrchestrator:
             self._labeler.shutdown()
         if self._voice_agent is not None:
             self._voice_agent.shutdown()
-            self._transcriber.shutdown()
-            self._voice_planner.shutdown()
-            self._scene_understanding.shutdown()
+            if self._transcriber is not None:
+                self._transcriber.shutdown()
+            if self._voice_planner is not None:
+                self._voice_planner.shutdown()
+            if self._scene_understanding is not None:
+                self._scene_understanding.shutdown()
         if self._metrics_log:
             self._metrics_log.close()
             self._metrics_log = None

@@ -89,6 +89,15 @@ class ServerConfig:
     # OpenAI
     openai_summary_model: str = "gpt-4o-mini"
 
+    # PersonaPlex (speech-to-speech voice agent via NVIDIA PersonaPlex-7B)
+    personaplex_enabled: bool = True
+    personaplex_url: str = "ws://localhost:8998/api/chat"  # Override with Modal URL
+    personaplex_voice_prompt: str = "NATF0.pt"
+    personaplex_text_temperature: float = 0.7
+    personaplex_text_topk: int = 25
+    personaplex_audio_temperature: float = 0.8
+    personaplex_audio_topk: int = 250
+
     # Debug
     debug_view: bool = False  # Show Quest camera feed + overlays in cv2 window
     metrics_log_path: Optional[str] = None  # JSONL file for structured metrics
