@@ -54,9 +54,12 @@ INTENSITY_MODIFIERS = {
     "moderately": 0.6, "somewhat": 0.6,
     "a bit": 0.4, "a little": 0.4,
 
-    # Weak (low intensity)
+    # Weak (low intensity) / transparency
     "slightly": 0.3, "barely": 0.2, "minimally": 0.2,
     "subtly": 0.25, "gently": 0.3,
+    "transparent": 0.35, "translucent": 0.45, "semi-transparent": 0.5,
+    "sheer": 0.3, "see-through": 0.3, "see through": 0.3,
+    "opaque": 1.0, "solid": 1.0,
 }
 
 # Brightness modifiers for colors (adjusts RGB values)

@@ -253,10 +253,13 @@ class VoiceCommandPlanner:
     _INTENSITY_HINTS = [
         # Increased all values to make effects stronger by default
         (r'\b(extremely|super|maximum|max|absolutely|completely|totally)\b', 1.0),
+        (r'\b(opaque|solid)\b', 1.0),
         (r'\b(very|really|highly|heavily)\b', 1.0),  # Increased from 0.9
         (r'\b(quite|pretty)\b', 0.9),                # Increased from 0.8
         (r'\b(moderately|somewhat)\b', 0.7),         # Increased from 0.6
+        (r'\b(semi-transparent|semi transparent|translucent)\b', 0.5),
         (r'\b(a bit|a little)\b', 0.5),              # Increased from 0.4
+        (r'\b(transparent|see-through|see through|sheer)\b', 0.35),
         (r'\b(slightly|barely|subtly|gently|minimally)\b', 0.35),  # Increased from 0.3
     ]
     _DARKNESS_HINTS = [
