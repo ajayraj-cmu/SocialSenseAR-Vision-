@@ -57,6 +57,7 @@ class ServerConfig:
     # Display confidence thresholds
     display_confidence_min: float = 0.75   # min confidence for client-side segment rendering
     dashboard_confidence_min: float = 0.10 # min confidence for debug dashboard display
+    effect_confidence_min: float = 0.60    # min confidence for applying effects/masks to segments
 
     # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"

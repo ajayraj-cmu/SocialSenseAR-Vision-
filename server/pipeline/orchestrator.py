@@ -922,6 +922,7 @@ class PipelineOrchestrator:
         2. Voice agent (if enabled)
 
         Sets EffectData on each segment.
+        Only applies effects to segments with confidence >= effect_confidence_min threshold.
         """
         from server.vision.segment_data import EffectData
 
@@ -937,6 +938,10 @@ class PipelineOrchestrator:
             return
 
         for seg in segments:
+            # Skip low-confidence segments - don't apply effects/masks to uncertain detections
+            if seg.confidence < self.config.effect_confidence_min:
+                continue
+
             if seg.label and seg.label in active_effects:
                 fx = active_effects[seg.label]
                 params = {}

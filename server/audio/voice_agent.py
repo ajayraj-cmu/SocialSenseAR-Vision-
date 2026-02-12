@@ -248,6 +248,42 @@ class VoiceCommandPlanner:
         rf'^un({_EFFECTS})\s+(.+)$', re.IGNORECASE,
     )
 
+    # Environmental request patterns for full-screen filters
+    _RE_TOO_BRIGHT = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|extremely)\s+bright', re.IGNORECASE,
+    )
+    _RE_TOO_DARK = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|extremely)\s+dark', re.IGNORECASE,
+    )
+    _RE_TOO_COLORFUL = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|so)\s+(?:many\s+)?color(?:s|ful)', re.IGNORECASE,
+    )
+    _RE_MAKE_DARKER = re.compile(
+        r'^(?:make\s+(?:it|everything|the\s+room)\s+)?(?:darker|more\s+dark)', re.IGNORECASE,
+    )
+    _RE_MAKE_BRIGHTER = re.compile(
+        r'^(?:make\s+(?:it|everything|the\s+room)\s+)?(?:brighter|more\s+bright|lighter)', re.IGNORECASE,
+    )
+    _RE_WARMER_TONE = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:warmer|warm(?:er)?\s+tone)', re.IGNORECASE,
+    )
+    _RE_COOLER_TONE = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:cooler|cool(?:er)?\s+tone)', re.IGNORECASE,
+    )
+    _RE_LESS_SATURATED = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:less\s+saturated|desaturate|grayscale|black\s+and\s+white)', re.IGNORECASE,
+    )
+    # Filter removal patterns
+    _RE_REMOVE_FILTER = re.compile(
+        r'^(?:remove|clear|stop|undo|turn\s+off)\s+(?:the\s+)?(?:filter|dimming|dim|tint|tone|effect)', re.IGNORECASE,
+    )
+    _RE_NORMAL_LIGHTING = re.compile(
+        r'^(?:normal|default|original|regular)\s+(?:lighting|brightness|view)', re.IGNORECASE,
+    )
+    _RE_REMOVE_DIM = re.compile(
+        r'^(?:un|remove|stop)\s*dim(?:ming)?', re.IGNORECASE,
+    )
+
     # Deterministic language hints so intensity/brightness obey user phrasing
     # even when LLM output is conservative.
     _INTENSITY_HINTS = [
@@ -512,7 +548,122 @@ class VoiceCommandPlanner:
                     reasoning=f"fast-path: {effect} on {target}",
                 )
 
-        # Pattern 6: bare target (1-2 words, no keywords) → default to blur
+        # Pattern 6: Environmental requests with full-screen filters
+        # "too bright" → dim filter + OUTLINE bright objects (so they're visible!)
+        if self._RE_TOO_BRIGHT.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=["light", "screen", "window"],
+                effect_type="outline",  # Changed from "dim" to "outline" for visibility
+                intensity=1.0,  # High intensity so outline is very visible
+                action="add",
+                full_screen_filter="dim",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: too bright → dim filter + outline bright objects",
+            )
+
+        # "too dark" → clear dim effects + brighten
+        if self._RE_TOO_DARK.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="dim",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: too dark → remove dim effects",
+            )
+
+        # "too many colors" / "too colorful" → desaturate/grayscale filter
+        if self._RE_TOO_COLORFUL.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="grayscale",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: too colorful → grayscale filter",
+            )
+
+        # "make it darker" → night filter + HIGHLIGHT lights (so they're visible!)
+        if self._RE_MAKE_DARKER.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=["light", "screen"],
+                effect_type="highlight",  # Changed from "dim" to "highlight" for visibility
+                intensity=0.9,
+                action="add",
+                full_screen_filter="night",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: darker → night filter + highlight lights",
+            )
+
+        # "remove the filter" / "clear the dimming" → clear filters and effects
+        if self._RE_REMOVE_FILTER.match(text) or self._RE_NORMAL_LIGHTING.match(text) or self._RE_REMOVE_DIM.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: remove filter → clear all filters and effects",
+            )
+
+        # "make it brighter" → clear filters
+        if self._RE_MAKE_BRIGHTER.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: brighter → clear filters",
+            )
+
+        # "warmer tone" → warm filter
+        if self._RE_WARMER_TONE.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="warm",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: warmer tone → warm filter",
+            )
+
+        # "cooler tone" → cool filter
+        if self._RE_COOLER_TONE.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="cool",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: cooler tone → cool filter",
+            )
+
+        # "less saturated" / "grayscale" → grayscale filter
+        if self._RE_LESS_SATURATED.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="grayscale",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: desaturate → grayscale filter",
+            )
+
+        # Pattern 7: bare target (1-2 words, no keywords) → default to blur
         words = text.lower().split()
         if len(words) <= 2:
             target = self._extract_target(text)
@@ -659,6 +810,13 @@ Examples with Intensity & Brightness:
 - "stop blurring person" → targets: ["person"], action: "remove"
 - "blur everything but me" → targets: ["person"], invert: true, effect_type: "blur", intensity: 0.9
 - "dim everything" → full_screen_filter: "dim", full_screen_intensity: 0.7, targets: []
+- "it's too bright" → targets: ["light", "screen", "window"], effect_type: "dim", intensity: 0.8, full_screen_filter: "dim", full_screen_intensity: 0.7
+- "too many colors" → full_screen_filter: "grayscale", full_screen_intensity: 0.6, targets: []
+- "make it darker" → targets: ["light", "screen"], effect_type: "dim", intensity: 0.8, full_screen_filter: "night", full_screen_intensity: 0.7
+- "warmer tone" → full_screen_filter: "warm", full_screen_intensity: 0.6, targets: []
+- "cooler tone" → full_screen_filter: "cool", full_screen_intensity: 0.6, targets: []
+- "less saturated" → full_screen_filter: "grayscale", full_screen_intensity: 0.7, targets: []
+- "make everything blue" → full_screen_filter: "color", full_screen_color: "#0000FF", full_screen_intensity: 0.6, targets: []
 - "frosted glass on screen" → targets: ["screen"], effect_type: "frosted_glass", intensity: 0.9
 - "redact laptop" → targets: ["laptop"], effect_type: "redact", intensity: 1.0
 - "spotlight on me" → targets: ["person"], effect_type: "dim", intensity: 0.8, invert: true
