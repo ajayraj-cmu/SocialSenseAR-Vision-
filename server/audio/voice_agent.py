@@ -1017,6 +1017,7 @@ class VoiceAgent:
 
         # Callback for SAM3 prompt sync (set by orchestrator)
         self._on_command_callback = None
+        self._verification_frame_provider = None
 
         # Cached frame for Gemini Vision
         self._latest_frame: Optional[np.ndarray] = None
@@ -1038,6 +1039,10 @@ class VoiceAgent:
         Used by orchestrator to sync SAM3 prompts with voice agent targets.
         """
         self._on_command_callback = callback
+
+    def set_verification_frame_provider(self, provider):
+        """Set callback that returns (composite_bgr, fw, fh) for Phase 2 verification."""
+        self._verification_frame_provider = provider
 
     def process_text_command(self, text: str):
         """Process a typed text command through the same Gemini pipeline as voice.
@@ -1400,13 +1405,13 @@ class VoiceAgent:
 
                 # Convert vision result to CommandPlan
                 plan = self._vision_result_to_command_plan(vision_result)
-                logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
 
-                # Add new SAM3 prompts if vision discovered new objects
+                # Merge new_prompts_for_sam into targets so SAM3 segments discovered objects
                 new_prompts = vision_result.get("new_prompts_for_sam", [])
-                if new_prompts and self._on_command_callback:
-                    # Sync new prompts with orchestrator (done in callback)
-                    pass
+                if new_prompts and plan.action in ("add", "change"):
+                    plan.targets = list(set(plan.targets) | set(new_prompts))
+
+                logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
             else:
                 # No frame available — crash (no fallback)
                 raise RuntimeError(
@@ -1514,6 +1519,21 @@ class VoiceAgent:
         # Update persistent state for incremental commands
         self._update_persistent_state(utterance, plan)
 
+        # Phase 2: Schedule verification (vision path only, async)
+        if self._scene and self._scene.available and self._verification_frame_provider and not fast:
+            executed_plan = {
+                "targets": plan.targets,
+                "effect_type": plan.effect_type,
+                "color_hex": plan.color_hex or "",
+                "intensity": plan.intensity,
+                "full_screen_filter": plan.full_screen_filter or "none",
+            }
+            threading.Thread(
+                target=self._run_phase2_verification,
+                args=(utterance, executed_plan),
+                daemon=True,
+            ).start()
+
         # Update conversation state
         response = self._generate_response(plan)
         self._conversation_state.update({
@@ -1524,6 +1544,71 @@ class VoiceAgent:
 
         elapsed_ms = (time.time() - t0) * 1000
         logger.info(f"Command executed in {elapsed_ms:.0f}ms: {response}")
+
+    def _run_phase2_verification(self, utterance: str, executed_plan: dict, round_num: int = 1):
+        """Phase 2: Verify applied effects and optionally apply corrections (runs in background thread)."""
+        max_rounds = 3
+        if round_num > max_rounds:
+            return
+
+        time.sleep(0.5)  # Allow SAM to process a frame with new effects
+
+        provider = getattr(self, "_verification_frame_provider", None)
+        if not provider:
+            return
+
+        try:
+            result = provider()
+            if result is None:
+                return
+            composite_bgr, fw, fh = result
+
+            verify_result = self._scene.verify_and_correct(
+                composite_bgr, executed_plan, utterance, max_corrections=1,
+            )
+
+            if verify_result.get("verified", True):
+                return
+
+            corrections = verify_result.get("corrections", {})
+            if not corrections:
+                return
+
+            # Apply corrections
+            new_targets = corrections.get("targets", executed_plan.get("targets", []))
+            new_effect = corrections.get("effect_type", executed_plan.get("effect_type", "none"))
+            new_intensity = float(corrections.get("intensity", executed_plan.get("intensity", 0.8)))
+            new_color = corrections.get("color_hex") or executed_plan.get("color_hex")
+            new_filter = corrections.get("full_screen_filter", executed_plan.get("full_screen_filter"))
+
+            logger.info(f"Phase 2 correction: targets={new_targets} effect={new_effect} intensity={new_intensity} filter={new_filter}")
+
+            with self._state_lock:
+                if new_filter and new_filter != "none":
+                    self._full_screen_filter = {"type": new_filter, "intensity": new_intensity, "color_hex": new_color or ""}
+                elif new_filter == "none":
+                    self._full_screen_filter = None
+                if new_targets:
+                    for t in new_targets:
+                        self._active_effects[t] = {"type": new_effect, "intensity": new_intensity, "invert": False, "color_hex": new_color}
+
+            if self._on_command_callback and new_targets:
+                self._on_command_callback("add", new_targets, new_effect, new_intensity, False, new_color)
+            elif new_filter == "none" and not new_targets:
+                self._on_command_callback("remove", [], "none", 0.0, False, None)
+
+            # Re-verify (optional)
+            updated_plan = {
+                "targets": new_targets,
+                "effect_type": new_effect,
+                "color_hex": new_color or "",
+                "intensity": new_intensity,
+                "full_screen_filter": new_filter or "none",
+            }
+            self._run_phase2_verification(utterance, updated_plan, round_num + 1)
+
+        except Exception as e:
+            logger.warning(f"Phase 2 verification error: {e}", exc_info=True)
 
     def _generate_response(self, plan: CommandPlan) -> str:
         """Generate friendly response message for user."""

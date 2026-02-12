@@ -140,6 +140,8 @@ class PipelineOrchestrator:
                     config=config,
                 )
                 self._voice_agent.set_on_command_callback(self._on_voice_command)
+                if hasattr(self._voice_agent, "set_verification_frame_provider"):
+                    self._voice_agent.set_verification_frame_provider(self._get_composite_for_verification)
                 logger.info("Voice agent pipeline created (will initialize on first frame)")
         else:
             logger.info("Audio disabled — voice agent not created")
@@ -364,6 +366,82 @@ class PipelineOrchestrator:
         """Get copy of active effects."""
         with self._effect_lock:
             return self._effect_registry.copy()
+
+    def _build_composite_frame(
+        self, frame_bgr: np.ndarray, fw: int, fh: int,
+        segments: list, full_screen_filter: dict | None,
+    ) -> np.ndarray:
+        """Build a server-side simulated composite for Phase 2 verification.
+
+        Applies full-screen filters and per-segment overlays (dim/color) to approximate
+        what the user sees. Blur is approximated as dim for speed.
+        """
+        out = frame_bgr.copy().astype(np.float32)
+
+        # Full-screen filter
+        if full_screen_filter:
+            ftype = full_screen_filter.get("type", "none")
+            intensity = float(full_screen_filter.get("intensity", 0.5))
+            if ftype == "dim" and intensity > 0:
+                out *= 1.0 - intensity
+            elif ftype == "grayscale" and intensity > 0:
+                gray = cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+                out = np.stack([gray, gray, gray], axis=-1).astype(np.float32)
+                out = out * (1 - intensity) + frame_bgr.astype(np.float32) * intensity
+            elif ftype == "night" and intensity > 0:
+                out *= 0.4 * (1 - intensity) + (1 - intensity * 0.6)
+            elif ftype == "color" and intensity > 0:
+                hex_color = full_screen_filter.get("color_hex", "#808080")
+                try:
+                    h = hex_color.lstrip("#")
+                    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
+                    tint = np.array([b, g, r], dtype=np.float32)
+                    out = out * (1 - intensity) + np.full_like(out, tint) * 255 * intensity
+                except (ValueError, IndexError):
+                    pass
+
+        # Per-segment overlays (dim or color)
+        for seg in segments:
+            if seg.mask is None or seg.effect is None or seg.effect.effect_type == "none":
+                continue
+            mask = seg.mask
+            if mask.shape[:2] != (fh, fw):
+                mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)
+            mask_bool = (mask > 0).astype(np.float32)
+            if mask_bool.sum() == 0:
+                continue
+            intensity = seg.effect.intensity
+            if seg.effect.effect_type == "dim":
+                out += (np.array([0, 0, 0], dtype=np.float32) - out) * mask_bool[:, :, np.newaxis] * intensity * 0.7
+            elif seg.effect.effect_type == "color" and seg.effect.color_hex:
+                try:
+                    h = seg.effect.color_hex.lstrip("#")
+                    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
+                    tint = np.array([b, g, r], dtype=np.float32) * 255
+                    out = out * (1 - mask_bool[:, :, np.newaxis] * intensity) + tint * mask_bool[:, :, np.newaxis] * intensity
+                except (ValueError, IndexError):
+                    pass
+
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    def _get_composite_for_verification(self) -> tuple[np.ndarray, int, int] | None:
+        """Get composite frame for Phase 2 verification. Returns (frame_bgr, fw, fh) or None."""
+        if self._voice_agent is None:
+            return None
+        with self._latest_frame_lock:
+            frame_tuple = self._latest_frame
+        if frame_tuple is None:
+            return None
+        frame_bgr, fw, fh, _ = frame_tuple
+        if frame_bgr is None:
+            return None
+
+        result = self._cached_result
+        segments = result.segments if result else []
+        full_screen = self._voice_agent.get_full_screen_filter()
+
+        composite = self._build_composite_frame(frame_bgr, fw, fh, segments, full_screen)
+        return (composite, fw, fh)
 
     # ------------------------------------------------------------------
     # Frame processing — pre-decodes JPEG, returns cached result
