@@ -1343,26 +1343,32 @@ class VoiceAgent:
     # When user keeps talking and says "Hey Vibe" again mid-stream, use text after the last occurrence.
     _LAST_INTENT_SPLIT = re.compile(r'\bhey\s+vi(?:be)?s?\b', re.IGNORECASE)
 
+    # Clear commands that bypass vision entirely (no scene context needed)
+    _RE_INSTANT_CLEAR = re.compile(
+        r'^(?:clear|reset|stop|off|normal|remove\s+(?:all|everything|filter(?:s)?))$',
+        re.IGNORECASE,
+    )
+
     def _execute_command(self, utterance: str):
-        """Execute command: Gemini plan → update state → apply effects.
+        """Execute command via two-phase Gemini Vision flow.
 
-        Two-phase vision flow (when scene understanding available):
-        Phase 1: Pre-command scene snapshot → vision-based plan
-        Phase 2: Post-execution verification (future enhancement)
+        Phase 1 (blocking): Snapshot current frame + send command to Gemini Vision.
+                            Vision determines targets, effects, exact RGB values, and
+                            accounts for persistent state (incremental commands like
+                            "make it darker" or "more transparent").
 
-        Crashes if Gemini Vision unavailable (no silent fallback to text-only).
+        Phase 2 (async):    After SAM3 applies the plan, snapshot the composite frame
+                            and ask Gemini Vision for correcting feedback. Applied in
+                            background — does not block the user.
 
-        Chain-of-thought: if the planner returns needs_clarification=True,
-        we don't execute any command — instead we send a follow-up question
-        to the user and wait for their response in the next utterance.
+        Only "clear/reset" style commands bypass vision (no scene context needed).
         """
-        # Normalize Whisper artifacts: strip punctuation, collapse whitespace
+        # Normalize Whisper artifacts
         utterance = re.sub(r'[.,!?;:]+', ' ', utterance).strip()
         utterance = re.sub(r'\s+', ' ', utterance)
-        # "nothing but" / "not but" → "but" (Whisper splits "everything but" across sentences)
         utterance = re.sub(r'\bnothing\s+but\b', 'but', utterance, flags=re.IGNORECASE)
 
-        # Long run-on with a repeated wake phrase: use only the text after the last "Hey Vibe" / "Hey Vi"
+        # Long run-on: use only the text after the last "Hey Vibe"
         if len(utterance) > 80:
             parts = self._LAST_INTENT_SPLIT.split(utterance)
             if len(parts) > 1 and parts[-1].strip():
@@ -1371,59 +1377,41 @@ class VoiceAgent:
 
         t0 = time.time()
 
-        # Get current state
-        with self._state_lock:
-            known_objs = self._known_objects.copy()
-            active_fx = self._active_effects.copy()
-
-        # --- Phase 1: Vision-based planning (when available) ---
-        # Try fast-path first (preserves existing low-latency behavior)
-        fast = self._planner._try_fast_parse(utterance)
-        if fast:
-            plan = self._planner._apply_language_modifiers(utterance, fast)
-            logger.info(f"Fast-path plan: {plan.action} {plan.effect_type} → {plan.targets}")
-        elif self._scene and self._scene.available:
-            # Vision-enhanced planning: get current frame + persistent state
-            with self._frame_lock:
-                frame_bgr = self._latest_frame.copy() if self._latest_frame is not None else None
-
-            if frame_bgr is not None:
-                # Get persistent state for incremental commands
-                persistent_state = self._get_persistent_state_snapshot()
-
-                # Phase 1: Call Gemini Vision for scene analysis
-                logger.info("Phase 1: Running vision-based scene analysis...")
-                vision_result = self._scene.plan_from_vision(utterance, frame_bgr, persistent_state)
-
-                # Detect vision failure (plan_from_vision raises; this is a safety check)
-                reasoning = vision_result.get("reasoning", "")
-                if "unavailable" in reasoning.lower() or "failed" in reasoning.lower() or reasoning.startswith("Error:"):
-                    raise RuntimeError(
-                        f"Gemini Vision failed: {reasoning}. "
-                        "Pipeline configured to crash on vision unavailability."
-                    )
-
-                # Convert vision result to CommandPlan
-                plan = self._vision_result_to_command_plan(vision_result)
-
-                # Merge new_prompts_for_sam into targets so SAM3 segments discovered objects
-                new_prompts = vision_result.get("new_prompts_for_sam", [])
-                if new_prompts and plan.action in ("add", "change"):
-                    plan.targets = list(set(plan.targets) | set(new_prompts))
-
-                logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
-            else:
-                # No frame available — crash (no fallback)
-                raise RuntimeError(
-                    "Gemini Vision requires a frame; no frame available. "
-                    "Pipeline configured to crash on vision unavailability."
-                )
-        else:
-            # Vision unavailable — crash (no fallback)
-            raise RuntimeError(
-                "Gemini Vision is unavailable (no API key or not initialized). "
-                "Pipeline configured to crash on vision unavailability."
+        # --- Instant clear/reset (no vision needed) ---
+        if self._RE_INSTANT_CLEAR.match(utterance):
+            plan = CommandPlan(
+                targets=[], effect_type="none", intensity=0.0,
+                action="remove", reasoning="instant: clear all",
             )
+            logger.info("Instant clear — skipping vision")
+            self._apply_plan(plan, utterance, t0, run_phase2=False)
+            return
+
+        # --- Phase 1: Snapshot frame → Gemini Vision → structured plan ---
+        with self._frame_lock:
+            frame_bgr = self._latest_frame.copy() if self._latest_frame is not None else None
+
+        if frame_bgr is None:
+            logger.warning("No frame available yet — skipping command")
+            return
+
+        persistent_state = self._get_persistent_state_snapshot()
+        logger.info(f"Phase 1: vision planning for \"{utterance}\"")
+        vision_result = self._scene.plan_from_vision(utterance, frame_bgr, persistent_state)
+
+        plan = self._vision_result_to_command_plan(vision_result)
+
+        # Vision may discover objects not yet in SAM3 — merge into targets
+        new_prompts = vision_result.get("new_prompts_for_sam", [])
+        if new_prompts and plan.action in ("add", "change"):
+            plan.targets = list(dict.fromkeys(plan.targets + new_prompts))
+
+        logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
+
+        self._apply_plan(plan, utterance, t0, run_phase2=True)
+
+    def _apply_plan(self, plan: CommandPlan, utterance: str, t0: float, run_phase2: bool):
+        """Apply a resolved CommandPlan: update state, notify orchestrator, schedule Phase 2."""
 
         # --- Chain-of-thought: handle clarification requests ---
         if plan.needs_clarification:
@@ -1519,8 +1507,8 @@ class VoiceAgent:
         # Update persistent state for incremental commands
         self._update_persistent_state(utterance, plan)
 
-        # Phase 2: Schedule verification (vision path only, async)
-        if self._scene and self._scene.available and self._verification_frame_provider and not fast:
+        # Phase 2: Schedule verification (async, does not block the user)
+        if run_phase2 and self._scene and self._scene.available and self._verification_frame_provider:
             executed_plan = {
                 "targets": plan.targets,
                 "effect_type": plan.effect_type,

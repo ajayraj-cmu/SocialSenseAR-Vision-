@@ -50,6 +50,7 @@ image = (
     .apt_install(
         "libgl1-mesa-glx", "libglib2.0-0", "libsm6",
         "libxext6", "libxrender-dev", "libgomp1", "ffmpeg",
+        "libopus-dev", "libportaudio2",  # PersonaPlex/Moshi
     )
     .pip_install(
         f"torch=={config.TORCH_VERSION}",
@@ -78,13 +79,19 @@ image = (
         "fastapi[standard]>=0.115.0",
         "uvicorn>=0.32.0",
         "tensorrt-cu12>=10.0",
+        # PersonaPlex/Moshi (same container as SAM3)
+        "einops==0.7",
+        "sentencepiece==0.2",
+        "sounddevice==0.5",
     )
     .env({"PYTHONPATH": "/root"})
     .env({"HF_HOME": f"{config.CACHE_MOUNT_PATH}/huggingface"})
     .env({"TRANSFORMERS_CACHE": f"{config.CACHE_MOUNT_PATH}/huggingface"})
     .env({"TORCH_HOME": f"{config.CACHE_MOUNT_PATH}/torch"})
+    .env({"NO_TORCH_COMPILE": "1"})  # PersonaPlex startup speed
     .add_local_dir("server", remote_path="/root/server")
     .add_local_dir("config", remote_path="/root/config")
+    .add_local_dir("personaPlex/personaplex/moshi", remote_path="/root/moshi")
     .add_local_file("modal_config.py", remote_path="/root/modal_config.py")
 )
 
@@ -163,6 +170,10 @@ class SocialSenseGPU:
 
         # ServerConfig defaults are the single source of truth.
         # Only override Modal-specific values (device, debug, API keys, metrics path).
+        # PersonaPlex: ON by default when unified with SAM3 (same Modal container).
+        # Set PERSONAPLEX_ENABLED=false to disable.
+        personaplex_env = os.getenv("PERSONAPLEX_ENABLED", "true").lower()
+        personaplex_enabled = personaplex_env in ("true", "1", "yes")
         self.server_config = ServerConfig(
             device="cuda",
             gpu_id=0,
@@ -172,8 +183,7 @@ class SocialSenseGPU:
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
             hf_sam_token=os.getenv("HF_SAM_TOKEN") or os.getenv("HF_TOKEN"),
             hf_personaplex_token=os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN"),
-            # PersonaPlex — enable if env var is set
-            personaplex_enabled=os.getenv("PERSONAPLEX_ENABLED", "").lower() in ("true", "1", "yes"),
+            personaplex_enabled=personaplex_enabled,
             personaplex_url=os.getenv("PERSONAPLEX_URL", "ws://localhost:8998/api/chat"),
         )
 
@@ -204,6 +214,50 @@ class SocialSenseGPU:
             logger.error("Pipeline initialization failed (check HF_SAM_TOKEN / HF_TOKEN in Modal secret and facebook/sam3 access): %s", e, exc_info=True)
             raise
 
+        # PersonaPlex (Moshi): start in-process server when enabled (same container as SAM3)
+        if personaplex_enabled:
+            import subprocess
+            import socket
+            from pathlib import Path
+
+            hf_pp = os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN")
+            if hf_pp:
+                os.environ["HF_TOKEN"] = hf_pp  # moshi subprocess uses this for nvidia/personaplex-7b-v1
+            moshi_path = Path("/root/moshi")
+            if moshi_path.exists():
+                logger.info("Installing moshi (PersonaPlex) for in-process server...")
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", str(moshi_path), "--no-deps"],
+                    capture_output=True,
+                    text=True,
+                    cwd="/root",
+                )
+                if result.returncode != 0:
+                    logger.warning("Moshi pip install stderr: %s", result.stderr)
+                logger.info("Starting PersonaPlex (Moshi) server on port 8998...")
+                subprocess.Popen(
+                    [sys.executable, "-m", "moshi.server", "--host", "0.0.0.0", "--port", "8998"],
+                    cwd="/root",
+                    env=os.environ.copy(),
+                )
+                # Wait for server to accept connections (up to 180s for model load)
+                for attempt in range(180):
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(2)
+                        sock.connect(("127.0.0.1", 8998))
+                        sock.close()
+                        logger.info("PersonaPlex (Moshi) server ready on ws://localhost:8998/api/chat")
+                        break
+                    except (socket.error, OSError):
+                        time.sleep(1)
+                        if attempt % 30 == 29:
+                            logger.info("Waiting for PersonaPlex server... (%ds)", attempt + 1)
+                else:
+                    logger.warning("PersonaPlex server did not become ready in 180s; voice may fail until it is up")
+            else:
+                logger.warning("Moshi path /root/moshi not found; PersonaPlex disabled")
+
         # Persist downloaded models so next cold start is faster
         cache_volume.commit()
 
@@ -233,10 +287,13 @@ class SocialSenseGPU:
             active = set()
             if self.pipeline:
                 active = self.pipeline.get_active_prompts()
+            cfg = self.server_config or {}
+            pp_enabled = getattr(cfg, "personaplex_enabled", False)
             return {
                 "service": "SocialSenseAR GPU Server",
                 "status": "online" if self.pipeline else "loading",
                 "pipeline": "sam3",
+                "personaplex_enabled": pp_enabled,
                 "active_prompts": sorted(active),
                 "ws_endpoint": "/ws",
             }

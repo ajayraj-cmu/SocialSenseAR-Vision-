@@ -12,7 +12,7 @@ import os
 
 # GPU type to use. Options:
 # - "A10G": 24GB VRAM, ~$1.10/hr (RECOMMENDED - best value)
-# - "A100": 40GB VRAM, ~$3.70/hr (overkill for SAM3, but fastest)
+# - "A100": 40GB VRAM, ~$3.70/hr (recommended when PersonaPlex is enabled; SAM3+PersonaPlex share GPU)
 # - "A100-80GB": 80GB VRAM, ~$4.50/hr (unnecessary for this workload)
 # - "L4": 24GB VRAM, ~$0.70/hr (budget option, slightly slower)
 # - "T4": 16GB VRAM, ~$0.50/hr (minimum viable, tight VRAM)
