@@ -1,14 +1,27 @@
 {
   "permissions": {
     "allow": [
-      "Bash(wc:*)",
+      "Bash(modal --version:*)",
+      "Bash(modal token show:*)",
+      "Bash(modal secret list:*)",
+      "Bash(modal deploy:*)",
+      "Bash(modal app list:*)",
+      "Bash(modal app show:*)",
+      "Bash(modal app logs:*)",
       "Bash(python:*)",
-      "Bash(huggingface-cli login:*)",
-      "WebSearch",
-      "Bash(pip install:*)"
+      "Bash(cp:*)",
+      "Bash(pip install:*)",
+      "Bash(protoc:*)",
+      "Bash(timeout 10 python:*)",
+      "Bash(modal serve:*)",
+      "Bash(modal token:*)",
+      "Bash(modal profile:*)",
+      "Bash(timeout 30 python:*)",
+      "Bash(python3:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)"
     ],
-    "additionalDirectories": [
-      "C:\\Users\\Marshall\\Documents\\GitHub\\nexhacks\\QuestCameraKit"
-    ]
+    "deny": [],
+    "ask": []
   }
 }

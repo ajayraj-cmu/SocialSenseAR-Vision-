@@ -95,8 +95,16 @@ class SAM3Segmenter:
         self._prompts_per_frame = config.sam3_prompts_per_frame
         self._confidence_threshold = config.sam3_confidence_threshold
 
-        # Dynamic prompt control — starts empty (no segmentation until commands arrive)
-        self._active_prompts: list[str] = []
+        # Dynamic prompt control.
+        #
+        # NOTE: For interactive clients (Unity Editor, webcam clients), it's much
+        # easier to validate end-to-end connectivity if at least one prompt is
+        # active by default. We default to "person" so users immediately see an
+        # overlay without needing a successful voice/text command round-trip.
+        #
+        # Typed/voice commands can still add/remove prompts at runtime, and a
+        # "clear" will still set this to empty.
+        self._active_prompts: list[str] = ["person"]
         self._prompts_lock = threading.Lock()
 
         # Mask cache: prompt -> (mask_u8, timestamp, frame_gen) for non-queried prompts

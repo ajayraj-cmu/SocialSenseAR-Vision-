@@ -58,12 +58,25 @@ def main():
     logger = logging.getLogger("server")
 
     # Load .env
-    project_root = Path(__file__).resolve().parent.parent
-    env_file = project_root / ".env"
-    if env_file.exists():
-        load_dotenv(env_file)
-        logger.info(f"Loaded env from {env_file}")
-    else:
+    #
+    # This repo is sometimes embedded inside a larger workspace (e.g. SAMARSDK/).
+    # Support both:
+    # - `ServerBackend/.env` (repo root)
+    # - workspace root `.env` (common when users keep all secrets in one place)
+    server_backend_root = Path(__file__).resolve().parent.parent
+    workspace_root = server_backend_root.parent
+    candidates = [server_backend_root / ".env", workspace_root / ".env"]
+
+    loaded_any = False
+    for p in candidates:
+        if p.exists():
+            load_dotenv(p, override=False)
+            logger.info(f"Loaded env from {p}")
+            loaded_any = True
+            break
+
+    if not loaded_any:
+        # Fall back to default dotenv behavior (search CWD / parents)
         load_dotenv()
 
     args = parse_args()
@@ -81,6 +94,12 @@ def main():
         metrics_log_path=args.metrics_log,
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
+        # HF tokens — separate for PersonaPlex vs SAM3 (fallback to HF_TOKEN)
+        hf_sam_token=os.getenv("HF_SAM_TOKEN") or os.getenv("HF_TOKEN"),
+        hf_personaplex_token=os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN"),
+        # PersonaPlex (optional)
+        personaplex_enabled=os.getenv("PERSONAPLEX_ENABLED", "").lower() in ("true", "1", "yes"),
+        personaplex_url=os.getenv("PERSONAPLEX_URL", "ws://localhost:8998/api/chat"),
     )
 
     # Check protobuf backend
@@ -100,10 +119,20 @@ def main():
     logger.info(f"  Pipeline: {config.pipeline_mode}")
     logger.info(f"  Protobuf: {pb_backend}")
     logger.info(f"  Audio:    {'enabled' if config.audio_enabled else 'disabled'}")
+    logger.info(f"  Voice:    {'PersonaPlex' if config.personaplex_enabled else 'faster-whisper + Gemini'}")
     logger.info(f"  Emotion:  {'enabled' if config.emotion_enabled else 'disabled'}")
     logger.info(f"  Gemini:   {'key set' if config.gemini_api_key else 'NO KEY'}")
     logger.info(f"  OpenAI:   {'key set' if config.openai_api_key else 'NO KEY'}")
+    logger.info(f"  HF SAM:   {'SET' if config.hf_sam_token else 'MISSING'}")
+    logger.info(f"  HF PP:    {'SET' if config.hf_personaplex_token else 'MISSING'}")
+    if config.personaplex_enabled:
+        logger.info(f"  PP URL:   {config.personaplex_url}")
     logger.info("")
+
+    # Ensure HF_TOKEN is set for SAM3 model loading (huggingface_hub reads HF_TOKEN)
+    if config.hf_sam_token and not os.getenv("HF_TOKEN"):
+        os.environ["HF_TOKEN"] = config.hf_sam_token
+        logger.info("Set HF_TOKEN from HF_SAM_TOKEN for SAM3 model loading")
 
     if pb_backend == "python":
         logger.warning("Pure Python protobuf detected — this is slow!")
@@ -117,18 +146,20 @@ def main():
             t_import = time.perf_counter()
             logger.info(f"  Import orchestrator: {(t_import - t_init)*1000:.0f}ms")
 
+            # IMPORTANT: do NOT eagerly call pipeline.initialize() here.
+            # We want the WebSocket server to start listening immediately so clients
+            # (Unity Editor, Quest) can connect even while models warm up.
+            #
+            # The orchestrator will call initialize() lazily on the first frame:
+            # PipelineOrchestrator.process_frame() checks _initialized and runs initialize().
             pipeline = PipelineOrchestrator(config)
             t_ctor = time.perf_counter()
             logger.info(f"  Create orchestrator: {(t_ctor - t_import)*1000:.0f}ms")
-
-            pipeline.initialize()
-            t_ready = time.perf_counter()
-            logger.info(f"  Pipeline.initialize: {(t_ready - t_ctor)*1000:.0f}ms")
-            logger.info(f"  TOTAL STARTUP: {(t_ready - t_init)*1000:.0f}ms")
+            logger.info("  Pipeline will initialize on first incoming frame...")
         except ImportError as e:
             logger.warning(f"Pipeline not available ({e}), running in stub mode")
         except Exception as e:
-            logger.error(f"Pipeline init failed: {e}", exc_info=True)
+            logger.error(f"Pipeline creation failed: {e}", exc_info=True)
             logger.warning("Falling back to stub mode")
     else:
         logger.info("Running in STUB mode (no ML models)")

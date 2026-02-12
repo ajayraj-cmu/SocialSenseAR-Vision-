@@ -34,5 +34,9 @@ faster-whisper>=1.0.0
 openai>=1.0.0
 webrtcvad>=2.0.10
 
+# PersonaPlex (optional — speech-to-speech via NVIDIA PersonaPlex-7B)
+sphn>=0.1.4,<0.2
+aiohttp>=3.9.0
+
 # MediaPipe (body detection)
 mediapipe>=0.10.0

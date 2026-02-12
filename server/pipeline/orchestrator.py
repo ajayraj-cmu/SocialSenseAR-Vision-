@@ -76,44 +76,71 @@ class PipelineOrchestrator:
 
         # Audio / Voice Agent components
         self._voice_agent = None
+        self._personaplex_bridge = None  # PersonaPlex bridge (if enabled)
+        self._transcriber = None
+        self._voice_planner = None
+        self._scene_understanding = None
+
         if config.audio_enabled:
-            from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
-            from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
+            if config.personaplex_enabled:
+                # --- PersonaPlex voice backend (replaces faster-whisper + wake word + Gemini planning) ---
+                from server.audio.personaplex_bridge import PersonaPlexBridge
+                from server.audio.personaplex_voice_agent import PersonaPlexVoiceAgent, PERSONAPLEX_SYSTEM_PROMPT
 
-            # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
-            if config.transcriber_backend == "local":
-                from server.audio.local_transcriber import LocalTranscriber
-                self._transcriber = LocalTranscriber(
-                    listening_model=config.whisper_listening_model,
-                    recording_model=config.whisper_recording_model,
-                    beam_size=config.whisper_beam_size,
+                self._personaplex_bridge = PersonaPlexBridge(
+                    url=config.personaplex_url,
+                    text_prompt=PERSONAPLEX_SYSTEM_PROMPT,
+                    voice_prompt=config.personaplex_voice_prompt,
+                    text_temperature=config.personaplex_text_temperature,
+                    text_topk=config.personaplex_text_topk,
+                    audio_temperature=config.personaplex_audio_temperature,
+                    audio_topk=config.personaplex_audio_topk,
                 )
-                logger.info("Transcriber: local (faster-whisper)")
+                self._voice_agent = PersonaPlexVoiceAgent(
+                    bridge=self._personaplex_bridge,
+                    config=config,
+                )
+                self._voice_agent.set_on_command_callback(self._on_voice_command)
+                logger.info("Voice agent: PersonaPlex (speech-to-speech)")
             else:
-                from server.audio.transcriber import WhisperTranscriber
-                self._transcriber = WhisperTranscriber(
-                    api_key=config.openai_api_key,
-                    model=config.whisper_model,
+                # --- Standard voice backend (faster-whisper / OpenAI Whisper + Gemini planning) ---
+                from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner
+                from server.vision.gemini_scene_understanding import GeminiSceneUnderstanding
+
+                # Conditional transcriber: local (faster-whisper) or cloud (OpenAI)
+                if config.transcriber_backend == "local":
+                    from server.audio.local_transcriber import LocalTranscriber
+                    self._transcriber = LocalTranscriber(
+                        listening_model=config.whisper_listening_model,
+                        recording_model=config.whisper_recording_model,
+                        beam_size=config.whisper_beam_size,
+                    )
+                    logger.info("Transcriber: local (faster-whisper)")
+                else:
+                    from server.audio.transcriber import WhisperTranscriber
+                    self._transcriber = WhisperTranscriber(
+                        api_key=config.openai_api_key,
+                        model=config.whisper_model,
+                    )
+                    logger.info("Transcriber: cloud (OpenAI Whisper)")
+
+                self._voice_planner = VoiceCommandPlanner(
+                    api_key=config.gemini_api_key,
+                    model=config.gemini_planning_model,
                 )
-                logger.info("Transcriber: cloud (OpenAI Whisper)")
+                self._scene_understanding = GeminiSceneUnderstanding(
+                    api_key=config.gemini_api_key,
+                    model=config.gemini_model,
+                )
 
-            self._voice_planner = VoiceCommandPlanner(
-                api_key=config.gemini_api_key,
-                model=config.gemini_planning_model,
-            )
-            self._scene_understanding = GeminiSceneUnderstanding(
-                api_key=config.gemini_api_key,
-                model=config.gemini_model,
-            )
-
-            self._voice_agent = VoiceAgent(
-                transcriber=self._transcriber,
-                planner=self._voice_planner,
-                scene_understanding=self._scene_understanding,
-                config=config,
-            )
-            self._voice_agent.set_on_command_callback(self._on_voice_command)
-            logger.info("Voice agent pipeline created (will initialize on first frame)")
+                self._voice_agent = VoiceAgent(
+                    transcriber=self._transcriber,
+                    planner=self._voice_planner,
+                    scene_understanding=self._scene_understanding,
+                    config=config,
+                )
+                self._voice_agent.set_on_command_callback(self._on_voice_command)
+                logger.info("Voice agent pipeline created (will initialize on first frame)")
         else:
             logger.info("Audio disabled — voice agent not created")
 
@@ -191,12 +218,19 @@ class PipelineOrchestrator:
 
         # Initialize voice agent components
         if self._voice_agent is not None:
-            self._transcriber.initialize()
-            self._voice_planner.initialize()
-            self._scene_understanding.initialize()
-            self._voice_agent.start()
-            t_voice = time.perf_counter()
-            logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+            if self.config.personaplex_enabled:
+                # PersonaPlex path — bridge handles its own connection lifecycle
+                self._voice_agent.start()
+                t_voice = time.perf_counter()
+                logger.info(f"  PersonaPlex voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
+            else:
+                # Standard path — transcriber + planner + scene understanding
+                self._transcriber.initialize()
+                self._voice_planner.initialize()
+                self._scene_understanding.initialize()
+                self._voice_agent.start()
+                t_voice = time.perf_counter()
+                logger.info(f"  Voice agent init: {(t_voice - t_lbl)*1000:.0f}ms")
         else:
             t_voice = t_lbl
 
@@ -222,9 +256,12 @@ class PipelineOrchestrator:
             self._labeler.shutdown()
         if self._voice_agent is not None:
             self._voice_agent.shutdown()
-            self._transcriber.shutdown()
-            self._voice_planner.shutdown()
-            self._scene_understanding.shutdown()
+            if self._transcriber is not None:
+                self._transcriber.shutdown()
+            if self._voice_planner is not None:
+                self._voice_planner.shutdown()
+            if self._scene_understanding is not None:
+                self._scene_understanding.shutdown()
         if self._metrics_log:
             self._metrics_log.close()
             self._metrics_log = None
@@ -278,20 +315,24 @@ class PipelineOrchestrator:
     # Effect registry (typed commands: blur/unblur)
     # ------------------------------------------------------------------
 
-    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0, invert: bool = False):
-        """Apply an effect to a label (e.g., blur laptop).
+    def set_effect(self, label: str, effect_type: str, intensity: float = 1.0,
+                   invert: bool = False, color_hex: str | None = None):
+        """Apply an effect to a label (e.g., blur laptop, color person blue).
 
         If invert=True, SAM3 segments the target but the effect applies to
         everything OUTSIDE the mask (e.g., "blur everything but laptop").
+        color_hex: Optional hex color string for "color" effect (e.g., "#FF0000")
         """
         with self._effect_lock:
             self._effect_registry[label] = {
                 "type": effect_type,
                 "intensity": min(1.0, max(0.0, intensity)),
                 "invert": invert,
+                "color_hex": color_hex,  # NEW: store color_hex
             }
         mode = " (inverted)" if invert else ""
-        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f}){mode}")
+        color_info = f" {color_hex}" if color_hex else ""
+        logger.info(f"Effect set: {label} -> {effect_type} ({intensity:.1f}){mode}{color_info}")
 
     def remove_effect(self, label: str):
         """Remove effect from a label."""
@@ -584,10 +625,29 @@ class PipelineOrchestrator:
     # ------------------------------------------------------------------
 
     def _encode_rle_all(self, segments: list, fw: int, fh: int):
-        """Encode all segment masks to RLE at reduced resolution with smooth edges."""
+        """Encode all segment masks to RLE at reduced resolution with smooth edges.
+        
+        Border smoothness strategy (additive, no regressions):
+        1. Resize to RLE scale (default 0.75x)
+        2. Morphology close+open to fill small holes and remove fragments
+        3. Gaussian blur for soft edges
+        4. Threshold to binary
+        5. Min area filter to discard sparse/broken fragments
+        """
         scale = self.config.rle_scale
         rle_w = int(fw * scale)
         rle_h = int(fh * scale)
+
+        # Get optional blur kernel size from config (default 7)
+        blur_kernel = self.config.rle_edge_blur_kernel
+        # Ensure kernel is odd for GaussianBlur
+        if blur_kernel % 2 == 0:
+            blur_kernel += 1
+
+        # Morphology kernel (configurable)
+        morph_k = self.config.rle_morph_kernel_size
+        min_area = self.config.rle_min_mask_area
+
         for seg in segments:
             if seg.mask is not None:
                 mask = seg.mask
@@ -597,12 +657,28 @@ class PipelineOrchestrator:
                 else:
                     small = cv2.resize(mask, (rle_w, rle_h), interpolation=cv2.INTER_LINEAR)
                     small_u8 = (small * 255).astype(np.uint8)
-                # Smooth mask edges before encoding
-                kernel = np.ones((5, 5), np.uint8)
-                small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_CLOSE, kernel)
-                small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_OPEN, kernel)
-                small_u8 = cv2.GaussianBlur(small_u8, (5, 5), 0)
-                seg.rle_mask = encode_rle((small_u8 > 128).astype(np.uint8))
+
+                # Smooth mask edges before encoding (optional config-based approach)
+                if self.config.rle_smooth_edges_only:
+                    # Blur-only mode: skip morphology, just blur for softer edges
+                    small_u8 = cv2.GaussianBlur(small_u8, (blur_kernel, blur_kernel), 0)
+                else:
+                    # Default mode: morphology + configurable blur for contiguous, smooth borders
+                    kernel = np.ones((morph_k, morph_k), np.uint8)
+                    small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_CLOSE, kernel)
+                    small_u8 = cv2.morphologyEx(small_u8, cv2.MORPH_OPEN, kernel)
+                    small_u8 = cv2.GaussianBlur(small_u8, (blur_kernel, blur_kernel), 0)
+
+                binary = (small_u8 > 128).astype(np.uint8)
+
+                # Min area filter: discard sparse/broken mask fragments
+                if min_area > 0 and cv2.countNonZero(binary) < min_area:
+                    seg.rle_mask = b""
+                    seg.mask_width = rle_w
+                    seg.mask_height = rle_h
+                    continue
+
+                seg.rle_mask = encode_rle(binary)
                 seg.mask_width = rle_w
                 seg.mask_height = rle_h
 
@@ -869,6 +945,7 @@ class PipelineOrchestrator:
                 seg.effect = EffectData(
                     effect_type=fx.get("type", "none"),
                     intensity=fx.get("intensity", 1.0),
+                    color_hex=fx.get("color_hex", ""),  # NEW: pass color_hex directly to EffectData
                     params=params,
                 )
 
@@ -883,6 +960,16 @@ class PipelineOrchestrator:
         """
         if self._voice_agent is not None:
             self._voice_agent.ingest_audio(pcm16_data, sample_rate, num_samples)
+
+    def get_audio_response(self):
+        """Get audio response from PersonaPlex (PCM16 16kHz bytes), or None.
+        
+        Only available when PersonaPlex is the voice backend.
+        Returns None when no audio is available or PersonaPlex is disabled.
+        """
+        if self._voice_agent is not None and hasattr(self._voice_agent, 'get_audio_response'):
+            return self._voice_agent.get_audio_response()
+        return None
 
     def get_conversation_state(self) -> dict:
         """Get conversation state for protobuf (includes voice agent state)."""
@@ -929,7 +1016,8 @@ class PipelineOrchestrator:
             self.set_effect(text_lower, "blur", 1.0)
             logger.info(f"No voice agent — direct prompt: {text_lower}")
 
-    def _on_voice_command(self, action: str, targets: list[str], effect_type: str, intensity: float, invert: bool = False):
+    def _on_voice_command(self, action: str, targets: list[str], effect_type: str, intensity: float,
+                          invert: bool = False, color_hex: str | None = None):
         """Callback from VoiceAgent: sync SAM3 prompts with voice commands.
 
         Per spec: "We should always leave requested objects within the array" —
@@ -937,6 +1025,7 @@ class PipelineOrchestrator:
 
         If invert=True, SAM3 segments the targets but the effect applies to
         everything OUTSIDE those masks (e.g., "blur everything but laptop").
+        color_hex: Optional hex color for "color" effect (e.g., "#FF0000")
         """
         # Validate targets — filter garbage from bad transcriptions
         valid_targets = []
@@ -956,9 +1045,15 @@ class PipelineOrchestrator:
         if action in ("add", "change"):
             for target in valid_targets:
                 self.add_prompt(target)
-                self.set_effect(target, effect_type, intensity, invert=invert)
+                self.set_effect(target, effect_type, intensity, invert=invert, color_hex=color_hex)
+            # Backward-compat cleanup: older parsing could store literal "background".
+            # When we now normalize "background" to inverted person effects, remove stale state.
+            if invert and "person" in valid_targets:
+                self.remove_effect("background")
+                self.remove_prompt("background")
             mode = " (inverted)" if invert else ""
-            logger.info(f"Voice → SAM3: add prompts {valid_targets} with {effect_type}@{intensity}{mode}")
+            color_info = f" {color_hex}" if color_hex else ""
+            logger.info(f"Voice → SAM3: add prompts {valid_targets} with {effect_type}@{intensity}{mode}{color_info}")
         elif action == "remove":
             if not valid_targets:
                 # "clear" command — remove ALL prompts and effects

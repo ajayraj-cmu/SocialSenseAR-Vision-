@@ -208,6 +208,83 @@ Format as JSON:
             logger.error(f"Gemini target identification error: {e}", exc_info=True)
             return {"targets": [], "effect_type": "none", "intensity": 1.0, "reasoning": f"Error: {e}"}
 
+    def verify_mask_effect(
+        self,
+        frame_bgr: np.ndarray,
+        applied_effect: str,
+        target_object: str,
+    ) -> dict:
+        """Async-safe Gemini Vision check: does the mask/effect look correct?
+
+        Used as an optional background check after applying effects.
+        Does not block the main pipeline — call from a background thread.
+
+        Args:
+            frame_bgr: Current frame with overlay applied (composite or screenshot)
+            applied_effect: Effect type that was applied (e.g., "blur", "color")
+            target_object: Object the effect was applied to (e.g., "laptop")
+
+        Returns:
+            {
+                "looks_correct": True/False,
+                "confidence": 0.0-1.0,
+                "suggestion": "optional adjustment suggestion" or "",
+                "reasoning": "brief explanation"
+            }
+        """
+        if not self._available:
+            return {"looks_correct": True, "confidence": 0.0, "suggestion": "", "reasoning": "Gemini unavailable"}
+
+        try:
+            # Encode frame as JPEG for Gemini
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            h, w = frame_rgb.shape[:2]
+            if max(h, w) > 768:
+                scale = 768 / max(h, w)
+                frame_rgb = cv2.resize(frame_rgb, (int(w * scale), int(h * scale)))
+
+            _, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, 75])
+
+            from PIL import Image
+            import io
+            pil_img = Image.open(io.BytesIO(buffer.tobytes()))
+
+            prompt = f"""Look at this AR view. A "{applied_effect}" effect was applied to "{target_object}".
+
+Is the effect covering the correct object? Is the visual result appropriate?
+
+Respond ONLY with JSON:
+{{
+    "looks_correct": true/false,
+    "confidence": 0.0-1.0,
+    "suggestion": "brief adjustment if needed, or empty string",
+    "reasoning": "brief explanation"
+}}"""
+
+            response = self._client.models.generate_content(
+                model=self._model, contents=[prompt, pil_img]
+            )
+            text = response.text.strip()
+
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            import json
+            result = json.loads(text)
+
+            logger.info(
+                f"Mask verification: {applied_effect} on {target_object} → "
+                f"{'OK' if result.get('looks_correct') else 'MISMATCH'} "
+                f"(confidence={result.get('confidence', 0):.2f})"
+            )
+            return result
+
+        except Exception as e:
+            logger.warning(f"Gemini mask verification error: {e}")
+            return {"looks_correct": True, "confidence": 0.0, "suggestion": "", "reasoning": f"Error: {e}"}
+
     def shutdown(self):
         """Clean up resources."""
         self._client = None

@@ -1,0 +1,155 @@
+{
+  "pixel_values_shape": [
+    1,
+    3,
+    784,
+    784
+  ],
+  "vision_output_shapes": {
+    "last_hidden_state": [
+      1,
+      3136,
+      1024
+    ],
+    "fpn_hs_0": [
+      1,
+      256,
+      224,
+      224
+    ],
+    "fpn_hs_1": [
+      1,
+      256,
+      112,
+      112
+    ],
+    "fpn_hs_2": [
+      1,
+      256,
+      56,
+      56
+    ],
+    "fpn_hs_3": [
+      1,
+      256,
+      28,
+      28
+    ],
+    "fpn_pe_0": [
+      1,
+      256,
+      224,
+      224
+    ],
+    "fpn_pe_1": [
+      1,
+      256,
+      112,
+      112
+    ],
+    "fpn_pe_2": [
+      1,
+      256,
+      56,
+      56
+    ],
+    "fpn_pe_3": [
+      1,
+      256,
+      28,
+      28
+    ]
+  },
+  "vision_output_names": [
+    "last_hidden_state",
+    "fpn_hs_0",
+    "fpn_hs_1",
+    "fpn_hs_2",
+    "fpn_hs_3",
+    "fpn_pe_0",
+    "fpn_pe_1",
+    "fpn_pe_2",
+    "fpn_pe_3"
+  ],
+  "decoder_output_info": {
+    "pred_masks": {
+      "shape": [
+        1,
+        200,
+        224,
+        224
+      ],
+      "dtype": "torch.float16"
+    },
+    "pred_logits": {
+      "shape": [
+        1,
+        200
+      ],
+      "dtype": "torch.float16"
+    },
+    "presence_logits": {
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "torch.float16"
+    }
+  },
+  "decoder_output_names": [
+    "pred_masks",
+    "pred_logits",
+    "presence_logits"
+  ],
+  "decoder_input_shapes": {
+    "fpn_hs_0": [
+      1,
+      256,
+      224,
+      224
+    ],
+    "fpn_hs_1": [
+      1,
+      256,
+      112,
+      112
+    ],
+    "fpn_hs_2": [
+      1,
+      256,
+      56,
+      56
+    ],
+    "fpn_pe_2": [
+      1,
+      256,
+      56,
+      56
+    ],
+    "text_embeds": [
+      1,
+      32,
+      256
+    ],
+    "attention_mask": [
+      1,
+      32
+    ]
+  },
+  "max_token_len": 32,
+  "image_size": [
+    784,
+    784
+  ],
+  "image_mean": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "image_std": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "do_rescale": true
+}

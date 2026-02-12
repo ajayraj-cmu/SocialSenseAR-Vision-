@@ -84,6 +84,15 @@ class SocialSenseServer:
         self._cached_response = None
         self._cached_segments_id = 0
 
+        # Clear all effects and prompts from previous session
+        if self.pipeline:
+            self.pipeline.clear_effects()
+            self.pipeline.set_active_prompts(set())
+            # Also clear voice agent state if it exists
+            if hasattr(self.pipeline, '_voice_agent') and self.pipeline._voice_agent:
+                self.pipeline._voice_agent.clear_all_effects()
+            logger.info("Cleared all effects, prompts, and voice agent state for new client session")
+
         try:
             async for raw_message in websocket:
                 await self._handle_message(websocket, raw_message)
@@ -204,7 +213,9 @@ class SocialSenseServer:
             if seg.effect is not None:
                 proto_seg.effect.effect_type = seg.effect.effect_type
                 proto_seg.effect.intensity = seg.effect.intensity
-                proto_seg.effect.color_hex = seg.effect.color_hex
+                # Only set color_hex if it's not empty (protobuf handles empty strings, but be explicit)
+                if seg.effect.color_hex:
+                    proto_seg.effect.color_hex = seg.effect.color_hex
                 for k, v in seg.effect.params.items():
                     proto_seg.effect.params[k] = v
 
@@ -233,6 +244,10 @@ class SocialSenseServer:
             if fs_filter:
                 response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
                 response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
+                # NEW: Set color_hex for full-screen color filters
+                color_hex = fs_filter.get("color_hex")
+                if color_hex:
+                    response.conversation.voice_agent.full_screen_filter.color_hex = color_hex
 
         # Metrics — report honest wall-clock time
         proto_ms = (time.perf_counter() - t0) * 1000
