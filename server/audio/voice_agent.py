@@ -31,13 +31,17 @@ logger = logging.getLogger(__name__)
 class CommandPlan:
     """Structured command plan from Gemini reasoning."""
     targets: list[str]  # object labels to target (SAM3 segments these)
-    effect_type: str  # "blur", "dim", "pixelate", etc.
+    effect_type: str  # "blur", "dim", "pixelate", "color", etc.
     intensity: float  # 0.0-1.0
     action: str  # "add", "remove", "change"
     invert: bool = False  # True = effect on everything EXCEPT targets (targets are the "safe" objects)
-    full_screen_filter: Optional[str] = None  # "dim", "warm", etc.
+    color_hex: Optional[str] = None  # NEW: hex color for "color" effect (e.g., "#FF0000")
+    full_screen_filter: Optional[str] = None  # "dim", "warm", "color", etc.
     full_screen_intensity: float = 0.5
+    full_screen_color: Optional[str] = None  # NEW: hex color for full-screen "color" filter
     reasoning: str = ""
+    needs_clarification: bool = False  # Chain-of-thought: True when intent is ambiguous
+    clarification_question: str = ""  # Follow-up question to ask the user
 
 
 class WakeWordGate:
@@ -218,11 +222,13 @@ class VoiceCommandPlanner:
     def available(self) -> bool:
         return self._available
 
-    # --- Fast-path regex patterns (built from EFFECT_TYPES) ---
-    _EFFECTS = '|'.join(EFFECT_TYPES)  # "blur|dim|pixelate|highlight|outline"
+    # --- Fast-path regex patterns (built from EFFECT_TYPES + custom types) ---
+    _EFFECTS = '|'.join(EFFECT_TYPES)  # "blur|dim|pixelate|highlight|outline|color"
+    _CUSTOM_EFFECTS = "frosted_glass|frosted glass|redact|grayscale|spotlight|desaturate|noise|soft_glow|warm_tint|cool_tint"
+    _ALL_EFFECTS = _EFFECTS + '|' + _CUSTOM_EFFECTS
     # Gerund/variant forms for "stop blurring", "remove dimming", etc.
     _EFFECTS_GERUND = (
-        r'blur(?:ring)?|pixelat(?:e|ing)|dim(?:ming)?|highlight(?:ing)?|outlin(?:e|ing)'
+        r'blur(?:ring)?|pixelat(?:e|ing)|dim(?:ming)?|highlight(?:ing)?|outlin(?:e|ing)|color(?:ing)?'
     )
     _FILLER = {'the', 'a', 'an', 'my', 'that', 'this'}
     _SELF_WORDS = {'me', 'myself', 'us'}
@@ -241,6 +247,69 @@ class VoiceCommandPlanner:
     _RE_UN_EFFECT = re.compile(
         rf'^un({_EFFECTS})\s+(.+)$', re.IGNORECASE,
     )
+
+    # Environmental request patterns for full-screen filters
+    _RE_TOO_BRIGHT = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|extremely)\s+bright', re.IGNORECASE,
+    )
+    _RE_TOO_DARK = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|extremely)\s+dark', re.IGNORECASE,
+    )
+    _RE_TOO_DULL = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really)\s+dull', re.IGNORECASE,
+    )
+    _RE_TOO_COLORFUL = re.compile(
+        r'^(?:it\'?s\s+)?(?:too|very|really|so)\s+(?:many\s+)?color(?:s|ful)', re.IGNORECASE,
+    )
+    _RE_MAKE_DARKER = re.compile(
+        r'^(?:make\s+(?:it|everything|the\s+room)\s+)?(?:darker|more\s+dark)', re.IGNORECASE,
+    )
+    _RE_MAKE_BRIGHTER = re.compile(
+        r'^(?:make\s+(?:it|everything|the\s+room)\s+)?(?:brighter|more\s+bright|lighter)', re.IGNORECASE,
+    )
+    _RE_WARMER_TONE = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:warmer|warm(?:er)?\s+tone)', re.IGNORECASE,
+    )
+    _RE_COOLER_TONE = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:cooler|cool(?:er)?\s+tone)', re.IGNORECASE,
+    )
+    _RE_LESS_SATURATED = re.compile(
+        r'^(?:make\s+(?:it|everything)\s+)?(?:less\s+saturated|desaturate|grayscale|black\s+and\s+white)', re.IGNORECASE,
+    )
+    # Filter removal patterns
+    _RE_REMOVE_FILTER = re.compile(
+        r'^(?:remove|clear|stop|undo|turn\s+off)\s+(?:the\s+)?(?:filter|dimming|dim|tint|tone|effect)', re.IGNORECASE,
+    )
+    _RE_NORMAL_LIGHTING = re.compile(
+        r'^(?:normal|default|original|regular)\s+(?:lighting|brightness|view)', re.IGNORECASE,
+    )
+    _RE_REMOVE_DIM = re.compile(
+        r'^(?:un|remove|stop)\s*dim(?:ming)?(?:\s+(?:screen|filter|effect))?', re.IGNORECASE,
+    )
+
+    # Deterministic language hints so intensity/brightness obey user phrasing
+    # even when LLM output is conservative.
+    _INTENSITY_HINTS = [
+        # Increased all values to make effects stronger by default
+        (r'\b(extremely|super|maximum|max|absolutely|completely|totally)\b', 1.0),
+        (r'\b(opaque|solid)\b', 1.0),
+        (r'\b(very|really|highly|heavily)\b', 1.0),  # Increased from 0.9
+        (r'\b(quite|pretty)\b', 0.9),                # Increased from 0.8
+        (r'\b(moderately|somewhat)\b', 0.7),         # Increased from 0.6
+        (r'\b(semi-transparent|semi transparent|translucent)\b', 0.5),
+        (r'\b(a bit|a little)\b', 0.5),              # Increased from 0.4
+        (r'\b(transparent|see-through|see through|sheer)\b', 0.35),
+        (r'\b(slightly|barely|subtly|gently|minimally)\b', 0.35),  # Increased from 0.3
+    ]
+    _DARKNESS_HINTS = [
+        # Adjusted multipliers to preserve color hue while darkening
+        # "very dark blue" should still look blue, not black
+        (r'\b(pitch black|jet black|pure black)\b', 0.0),
+        (r'\b(extremely dark)\b', 0.25),  # Increased from 0.08 to preserve color
+        (r'\b(very dark)\b', 0.40),       # Increased from 0.20 to preserve color
+        (r'\b(dark)\b', 0.55),            # Increased from 0.35 to preserve color
+        (r'\b(deep)\b', 0.65),            # Increased from 0.50 to preserve color
+    ]
 
     def _extract_target(self, raw: str) -> Optional[str]:
         """Extract a single confident target from raw text.
@@ -288,10 +357,134 @@ class VoiceCommandPlanner:
             return 'outline'
         return 'blur'
 
+    @staticmethod
+    def _adjust_hex_brightness(hex_color: str, mult: float) -> str:
+        """Darken a hex color by multiplier (0..1)."""
+        if not hex_color or not isinstance(hex_color, str):
+            return hex_color
+        s = hex_color.strip()
+        if not s:
+            return s
+        if s.startswith("#"):
+            s = s[1:]
+        if len(s) != 6:
+            return hex_color
+        try:
+            r = int(s[0:2], 16)
+            g = int(s[2:4], 16)
+            b = int(s[4:6], 16)
+            r = max(0, min(255, int(r * mult)))
+            g = max(0, min(255, int(g * mult)))
+            b = max(0, min(255, int(b * mult)))
+            return f"#{r:02X}{g:02X}{b:02X}"
+        except Exception:
+            return hex_color
+
+    def _apply_language_modifiers(self, utterance: str, plan: CommandPlan) -> CommandPlan:
+        """Post-process parsed plan with deterministic intensity/brightness hints."""
+        text = utterance.lower()
+
+        # Intensity hint from language
+        hinted_intensity = None
+        for pattern, value in self._INTENSITY_HINTS:
+            if re.search(pattern, text):
+                hinted_intensity = value
+                break
+
+        if hinted_intensity is not None and plan.action in ("add", "change"):
+            plan.intensity = max(0.0, min(1.0, hinted_intensity))
+            if plan.full_screen_filter:
+                plan.full_screen_intensity = max(0.0, min(1.0, hinted_intensity))
+
+        # Darkness/black handling for color effects
+        dark_mult = None
+        for pattern, value in self._DARKNESS_HINTS:
+            if re.search(pattern, text):
+                dark_mult = value
+                break
+
+        is_color_effect = (plan.effect_type == "color") or (plan.full_screen_filter == "color")
+        if is_color_effect and dark_mult is not None:
+            if "black" in text:
+                # User explicitly asked for black; make it truly black and strong.
+                plan.color_hex = "#000000" if plan.effect_type == "color" else plan.color_hex
+                plan.full_screen_color = "#000000" if plan.full_screen_filter == "color" else plan.full_screen_color
+                plan.intensity = max(plan.intensity, 1.0)
+                if plan.full_screen_filter:
+                    plan.full_screen_intensity = max(plan.full_screen_intensity, 1.0)
+            else:
+                # Darken the color while preserving hue
+                if plan.effect_type == "color" and plan.color_hex:
+                    plan.color_hex = self._adjust_hex_brightness(plan.color_hex, dark_mult)
+                if plan.full_screen_filter == "color" and plan.full_screen_color:
+                    plan.full_screen_color = self._adjust_hex_brightness(plan.full_screen_color, dark_mult)
+                # Dark colors need high intensity to be visible
+                plan.intensity = max(plan.intensity, 1.0)
+                if plan.full_screen_filter:
+                    plan.full_screen_intensity = max(plan.full_screen_intensity, 1.0)
+
+        # Color effects without darkness modifiers should still use high intensity by default
+        if is_color_effect and plan.action in ("add", "change") and hinted_intensity is None and dark_mult is None:
+            plan.intensity = max(plan.intensity, 1.0)
+            if plan.full_screen_filter:
+                plan.full_screen_intensity = max(plan.full_screen_intensity, 1.0)
+
+        return plan
+
+    # Ambiguous phrases that need clarification (chain-of-thought reasoning)
+    _AMBIGUOUS_PATTERNS = [
+        re.compile(r'^(?:can you |could you |please )?(?:segment|do something|handle|work on|fix|change|modify|adjust)\s+(?:that|this|it|those|them)\.?$', re.IGNORECASE),
+        re.compile(r'^(?:that|this|those|them|it)\s*\.?$', re.IGNORECASE),
+        re.compile(r'^(?:can you |could you )?(?:do|help|fix|change)\s+(?:something|anything)\s*(?:with|about|to)?\s*(?:that|this|it|them)?\.?$', re.IGNORECASE),
+        re.compile(r'^(?:segment|mask|overlay|effect)\s+(?:that|this|it|those|them)\s*(?:out)?\.?$', re.IGNORECASE),
+    ]
+
+    # Clear implicit requests that should NOT trigger clarification
+    _CLEAR_IMPLICIT_PATTERNS = [
+        re.compile(r'(?:it\'?s?\s+)?(?:too?\s+)?(?:bright|dark|loud|noisy|distracting|cluttered)', re.IGNORECASE),
+        re.compile(r'(?:there\'?s?\s+)?(?:too?\s+)?(?:much\s+)?(?:light|glare|clutter|noise)', re.IGNORECASE),
+        re.compile(r'(?:i\s+)?(?:can\'?t|cannot)\s+(?:see|focus|concentrate|read)', re.IGNORECASE),
+        re.compile(r'(?:everything\s+is\s+)?(?:blinding|blurry|overwhelming)', re.IGNORECASE),
+    ]
+
+    def _needs_clarification(self, utterance: str) -> Optional[str]:
+        """Check if utterance is ambiguous and needs a follow-up question.
+        
+        Returns clarification question string, or None if the request is clear.
+        """
+        text = utterance.strip().lower()
+        
+        # Clear implicit requests never need clarification
+        for pattern in self._CLEAR_IMPLICIT_PATTERNS:
+            if pattern.search(text):
+                return None
+        
+        # Check for ambiguous patterns
+        for pattern in self._AMBIGUOUS_PATTERNS:
+            if pattern.search(text):
+                if "segment" in text:
+                    return "Which object would you like me to segment? Can you be more specific?"
+                elif "fix" in text or "change" in text or "modify" in text or "adjust" in text:
+                    return "What would you like me to change, and which object are you referring to?"
+                else:
+                    return "I'd be happy to help! Which object are you referring to, and what effect would you like?"
+        
+        return None
+
     def _try_fast_parse(self, utterance: str) -> Optional[CommandPlan]:
         """Regex fast-path for obvious commands. Returns None if not confident."""
         # Strip Whisper punctuation (periods, commas, exclamation marks)
         text = re.sub(r'[.,!?;:]+', '', utterance).strip()
+        
+        # Check for ambiguous requests that need clarification (chain-of-thought)
+        clarification = self._needs_clarification(text)
+        if clarification:
+            return CommandPlan(
+                targets=[], effect_type="none", intensity=0.0,
+                action="add", needs_clarification=True,
+                clarification_question=clarification,
+                reasoning="chain-of-thought: ambiguous request, asking for clarification",
+            )
 
         # Pattern 1: clear/reset/stop/off
         if self._RE_CLEAR.match(text):
@@ -309,7 +502,7 @@ class VoiceCommandPlanner:
                 return None
             return CommandPlan(
                 targets=[target], effect_type=m.group(1).lower(),
-                intensity=0.8, action="add", invert=True,
+                intensity=0.9, action="add", invert=True,  # Increased from 0.8
                 reasoning=f"fast-path: {m.group(1)} everything but {target}",
             )
 
@@ -333,18 +526,166 @@ class VoiceCommandPlanner:
                 return None
             return CommandPlan(
                 targets=[target], effect_type=m.group(1).lower(),
-                intensity=0.8, action="add",
+                intensity=0.9, action="add",  # Increased from 0.8
                 reasoning=f"fast-path: {m.group(1)} {target}",
             )
 
-        # Pattern 5: bare target (1-2 words, no keywords) → default to blur
+        # Pattern 5: Custom effect types (frosted glass, redact, spotlight, etc.)
+        custom_match = re.match(
+            rf'^(?:apply\s+)?({self._CUSTOM_EFFECTS})\s+(?:on\s+|to\s+)?(.+)$', text, re.IGNORECASE,
+        )
+        if custom_match:
+            effect = custom_match.group(1).lower().replace(' ', '_')
+            target = self._extract_target(custom_match.group(2))
+            if target is not None:
+                # "spotlight" is semantically "dim everything except target"
+                if effect == "spotlight":
+                    return CommandPlan(
+                        targets=[target], effect_type="dim",
+                        intensity=0.8, action="add", invert=True,
+                        reasoning=f"fast-path: spotlight on {target} (inverted dim)",
+                    )
+                return CommandPlan(
+                    targets=[target], effect_type=effect,
+                    intensity=0.9, action="add",
+                    reasoning=f"fast-path: {effect} on {target}",
+                )
+
+        # Pattern 6: Environmental requests with full-screen filters
+        # "too bright" → dim filter + OUTLINE bright objects (so they're visible!)
+        if self._RE_TOO_BRIGHT.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=["light", "screen", "window"],
+                effect_type="outline",  # Changed from "dim" to "outline" for visibility
+                intensity=1.0,  # High intensity so outline is very visible
+                action="add",
+                full_screen_filter="dim",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: too bright → dim filter + outline bright objects",
+            )
+
+        # "too dark" → clear dim effects + brighten
+        if self._RE_TOO_DARK.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="dim",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: too dark → remove dim effects",
+            )
+
+        # "too dull" → clear dim/filters (user wants it brighter)
+        if self._RE_TOO_DULL.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: too dull → clear filters",
+            )
+
+        # "too many colors" / "too colorful" → desaturate/grayscale filter
+        if self._RE_TOO_COLORFUL.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="grayscale",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: too colorful → grayscale filter",
+            )
+
+        # "make it darker" → night filter + HIGHLIGHT lights (so they're visible!)
+        if self._RE_MAKE_DARKER.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=["light", "screen"],
+                effect_type="highlight",  # Changed from "dim" to "highlight" for visibility
+                intensity=0.9,
+                action="add",
+                full_screen_filter="night",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: darker → night filter + highlight lights",
+            )
+
+        # "remove the filter" / "clear the dimming" → clear filters and effects
+        if self._RE_REMOVE_FILTER.match(text) or self._RE_NORMAL_LIGHTING.match(text) or self._RE_REMOVE_DIM.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: remove filter → clear all filters and effects",
+            )
+
+        # "make it brighter" → clear filters
+        if self._RE_MAKE_BRIGHTER.match(text):
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="remove",
+                full_screen_filter="none",
+                full_screen_intensity=0.0,
+                reasoning="fast-path: brighter → clear filters",
+            )
+
+        # "warmer tone" → warm filter
+        if self._RE_WARMER_TONE.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="warm",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: warmer tone → warm filter",
+            )
+
+        # "cooler tone" → cool filter
+        if self._RE_COOLER_TONE.match(text):
+            intensity = self._apply_language_modifiers(text, 0.6)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="cool",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: cooler tone → cool filter",
+            )
+
+        # "less saturated" / "grayscale" → grayscale filter
+        if self._RE_LESS_SATURATED.match(text):
+            intensity = self._apply_language_modifiers(text, 0.7)
+            return CommandPlan(
+                targets=[],
+                effect_type="none",
+                intensity=0.0,
+                action="add",
+                full_screen_filter="grayscale",
+                full_screen_intensity=intensity,
+                reasoning="fast-path: desaturate → grayscale filter",
+            )
+
+        # Pattern 7: bare target (1-2 words, no keywords) → default to blur
         words = text.lower().split()
         if len(words) <= 2:
             target = self._extract_target(text)
             if target is not None:
                 return CommandPlan(
                     targets=[target], effect_type="blur",
-                    intensity=0.8, action="add",
+                    intensity=0.9, action="add",  # Increased from 0.8
                     reasoning=f"fast-path: bare target → blur {target}",
                 )
 
@@ -356,63 +697,164 @@ class VoiceCommandPlanner:
         utterance: str,
         known_objects: set[str],
         active_effects: dict[str, dict],
+        conversation_state: Optional[dict] = None,
     ) -> CommandPlan:
         """Map natural language utterance to structured command plan.
 
         Tries regex fast-path first (0ms). Falls back to Gemini for complex commands.
+        Passes full pipeline context to Gemini for accurate command generation.
         """
         # Try fast regex parse first
         fast = self._try_fast_parse(utterance)
         if fast:
-            logger.info(
-                f"Fast-path plan: {fast.action} {fast.effect_type} → "
-                f"{fast.targets} (invert={fast.invert})"
-            )
+            fast = self._apply_language_modifiers(utterance, fast)
+            if fast.needs_clarification:
+                logger.info(f"Fast-path: needs clarification → \"{fast.clarification_question}\"")
+            else:
+                logger.info(
+                    f"Fast-path plan: {fast.action} {fast.effect_type} → "
+                    f"{fast.targets} (invert={fast.invert})"
+                )
             return fast
 
         if not self._available:
             logger.warning(f"Gemini unavailable, extracting targets from text: {utterance}")
-            return self._emergency_parse(utterance)
+            return self._apply_language_modifiers(utterance, self._emergency_parse(utterance))
 
         try:
             known_str = ', '.join(sorted(known_objects)) if known_objects else 'none'
-            active_str = ', '.join(f"{k}:{v['type']}" for k, v in active_effects.items()) if active_effects else 'none'
+            active_str = ', '.join(f"{k}:{v['type']}@{v.get('intensity', 1.0):.1f}" for k, v in active_effects.items()) if active_effects else 'none'
+            
+            # Full pipeline context for Gemini (chain-of-thought reasoning)
+            conv_state = conversation_state or {}
+            pending_clarification = conv_state.get("pending_clarification", False)
+            last_command = conv_state.get("last_command", "")
 
             prompt = f"""Parse this command into a structured action plan. Respond ONLY with JSON.
 
 User said: "{utterance}"
 
-Context:
-- Known objects: {known_str}
-- Active effects: {active_str}
+Full Pipeline Context:
+- Known objects in scene (SAM3 has detected these): {known_str}
+- Currently active effects: {active_str}
+- Available effect types: blur, dim, pixelate, highlight, outline, color
+- Available custom masks: frosted_glass, redact, grayscale, spotlight, desaturate, noise
+- Available full-screen filters: dim, warm, cool, night, grayscale, color
+- Pipeline supports: inverted effects (apply to everything EXCEPT target), color overlays with hex colors
+- Previous user command: "{last_command}"
+- Was waiting for clarification: {pending_clarification}
 
 Output JSON with these fields:
 - "targets": list of object labels. ALWAYS include any object the user names, even if not in the known set. SAM3 will search for it.
 - "effect_type": {' | '.join(f'"{e}"' for e in EFFECT_TYPES)}
-- "intensity": 0.0-1.0 (default 0.8)
+- "color_hex": hex color string (e.g., "#FF0000") if effect_type is "color" or user requests a specific color. IMPORTANT: Adjust brightness based on modifiers (see brightness rules below).
+- "intensity": 0.0-1.0 representing effect strength. Extract from intensity modifiers in the command (see intensity rules below). Default: 0.8 for normal effects, 0.5 for full-screen filters.
 - "action": "add" | "remove" | "change"
 - "invert": true if effect applies to everything EXCEPT targets (e.g. "blur everything but laptop")
-- "full_screen_filter": "dim" | "warm" | "cool" | "night" | "grayscale" | null
+- "full_screen_filter": "dim" | "warm" | "cool" | "night" | "grayscale" | "color" | null
 - "full_screen_intensity": 0.0-1.0
+- "full_screen_color": hex color string if full_screen_filter is "color"
+- "needs_clarification": true ONLY if the user's request is AMBIGUOUS (e.g., "segment that", "do something with it") AND you cannot determine the target or effect. false for CLEAR requests.
+- "clarification_question": short follow-up question to ask (only when needs_clarification is true)
 - "reasoning": brief explanation
 
-Rules:
-- "blur phone" → targets: ["phone"], effect_type: "blur", action: "add"
-- "pixelate laptop" → targets: ["laptop"], effect_type: "pixelate", action: "add"
+CRITICAL CHAIN-OF-THOUGHT RULES:
+- If the user says something ambiguous like "segment that", "do something with it", "handle that" — set needs_clarification=true and provide a brief question.
+- If the user says something clear and actionable like "it's too bright", "blur the laptop", "dim everything" — set needs_clarification=false and execute immediately. Do NOT ask for clarification on clear requests!
+- "it's too bright" → CLEAR: apply dim filter immediately, NO clarification needed.
+- "segment that out" → AMBIGUOUS: ask "Which object would you like me to segment?"
+
+Intensity Rules (IMPORTANT - extract from user's language):
+- "extremely", "super", "maximum": intensity = 1.0
+- "very", "really", "highly", "heavily": intensity = 1.0 (changed to 1.0 for stronger effects)
+- "quite", "pretty": intensity = 0.9 (increased from 0.8)
+- "moderately", "somewhat": intensity = 0.7 (increased from 0.6)
+- "a bit", "a little": intensity = 0.5 (increased from 0.4)
+- "slightly", "barely", "subtly": intensity = 0.35 (increased from 0.3)
+- No modifier for color effects: intensity = 1.0 (changed from 0.8 - color overlays need high opacity by default)
+- No modifier for blur/dim: intensity = 0.9 (changed from 0.8 for stronger effects)
+- No modifier for other effects: intensity = 0.8
+
+Brightness Rules for Colors (CRITICAL - calculate exact RGB values):
+IMPORTANT: When darkening a color, you MUST preserve its hue (color identity).
+"very dark blue" should still clearly look BLUE, not black!
+
+Step-by-step RGB calculation:
+1. Start with base color hex (e.g., blue = #0000FF → R:0, G:0, B:255)
+2. Apply brightness multiplier to EACH channel separately
+3. Round to nearest integer and clamp to 0-255
+4. Convert back to hex
+
+Darkness multipliers (PRESERVE COLOR HUE):
+- "pitch black", "jet black", "pure black": multiply by 0.0 → #000000 (only for black specifically)
+- "extremely dark [color]": multiply RGB by 0.25 (e.g., "extremely dark blue" → #000040, still recognizable as dark blue)
+- "very dark [color]": multiply RGB by 0.40 (e.g., "very dark blue" #0000FF → R:0, G:0, B:102 → #000066, clearly blue)
+- "dark [color]": multiply RGB by 0.55 (e.g., "dark red" #FF0000 → R:140, G:0, B:0 → #8C0000, clearly red)
+- "deep [color]": multiply RGB by 0.65 (e.g., "deep green" → #006B00, clearly green)
+- Normal [color]: use base color unchanged (e.g., "blue" → "#0000FF")
+- "bright [color]": multiply RGB by 1.2, clamp to 255 (e.g., "bright red" #FF0000 → stays #FF0000, already max)
+- "very bright [color]": multiply RGB by 1.4, clamp to 255
+- "pale [color]", "pastel [color]": blend 70% color + 30% white
+
+EXAMPLE CALCULATIONS:
+- "very dark blue":
+  Base: #0000FF (R:0, G:0, B:255)
+  Multiply by 0.40: R:0×0.4=0, G:0×0.4=0, B:255×0.4=102
+  Result: #000066 ← This is clearly BLUE, not black!
+
+- "dark red":
+  Base: #FF0000 (R:255, G:0, B:0)
+  Multiply by 0.55: R:255×0.55=140, G:0×0.55=0, B:0×0.55=0
+  Result: #8C0000 ← This is clearly RED, not black!
+
+- "extremely dark green":
+  Base: #00FF00 (R:0, G:255, B:0)
+  Multiply by 0.25: R:0×0.25=0, G:255×0.25=64, B:0×0.25=0
+  Result: #004000 ← This is clearly GREEN, not black!
+
+Examples with Intensity & Brightness:
+- "make person blue" → targets: ["person"], effect_type: "color", color_hex: "#0000FF", intensity: 1.0, action: "add"
+- "make wall very dark blue" → targets: ["wall"], effect_type: "color", color_hex: "#000066" (BLUE preserved!), intensity: 1.0, action: "add"
+- "extremely dark black ceiling" → targets: ["ceiling"], effect_type: "color", color_hex: "#000000", intensity: 1.0
+- "very bright red wall" → targets: ["wall"], effect_type: "color", color_hex: "#FF0000" (already max brightness), intensity: 1.0, action: "add"
+- "slightly blur laptop" → targets: ["laptop"], effect_type: "blur", intensity: 0.3, action: "add"
+- "really dim screen" → targets: ["screen"], effect_type: "dim", intensity: 0.9, action: "add"
+- "blur phone" → targets: ["phone"], effect_type: "blur", intensity: 0.9, action: "add"
+- "blur background" → targets: ["person"], invert: true, effect_type: "blur", intensity: 0.9
+- "pixelate laptop" → targets: ["laptop"], effect_type: "pixelate", intensity: 0.9, action: "add"
 - "stop blurring person" → targets: ["person"], action: "remove"
-- "blur everything but me" → targets: ["person"], invert: true
+- "blur everything but me" → targets: ["person"], invert: true, effect_type: "blur", intensity: 0.9
+- "dim everything" → full_screen_filter: "dim", full_screen_intensity: 0.7, targets: []
+- "it's too bright" → targets: ["light", "screen", "window"], effect_type: "dim", intensity: 0.8, full_screen_filter: "dim", full_screen_intensity: 0.7
+- "too many colors" → full_screen_filter: "grayscale", full_screen_intensity: 0.6, targets: []
+- "make it darker" → targets: ["light", "screen"], effect_type: "dim", intensity: 0.8, full_screen_filter: "night", full_screen_intensity: 0.7
+- "stop dimming" / "stop dimming screen" / "stop dimming filter" → action: "remove", full_screen_filter: "none", targets: []
+- "it's too dull" / "too dull" → action: "remove", full_screen_filter: "none", targets: []
+- "make it brighter" / "normal lighting" → action: "remove", full_screen_filter: "none", targets: []
+- "warmer tone" → full_screen_filter: "warm", full_screen_intensity: 0.6, targets: []
+- "cooler tone" → full_screen_filter: "cool", full_screen_intensity: 0.6, targets: []
+- "less saturated" → full_screen_filter: "grayscale", full_screen_intensity: 0.7, targets: []
+- "make everything blue" → full_screen_filter: "color", full_screen_color: "#0000FF", full_screen_intensity: 0.6, targets: []
+- "frosted glass on screen" → targets: ["screen"], effect_type: "frosted_glass", intensity: 0.9
+- "redact laptop" → targets: ["laptop"], effect_type: "redact", intensity: 1.0
+- "spotlight on me" → targets: ["person"], effect_type: "dim", intensity: 0.8, invert: true
+- Base color hex: "blue" → "#0000FF", "red" → "#FF0000", "green" → "#00FF00", "yellow" → "#FFFF00", "orange" → "#FFA500", "purple" → "#800080", "pink" → "#FFC0CB", "black" → "#000000", "white" → "#FFFFFF", etc.
+- If user says "highlight X" without color, use effect_type: "highlight" (warm yellow)
+- If user says "highlight X [color]", use effect_type: "color" with that color
 - NEVER return empty targets if the user names an object
-- If just an object name with no action ("person"), default to blur
+- If just an object name with no action ("person"), default to outline effect
 
 {{
-    "targets": ["phone"],
-    "effect_type": "pixelate",
+    "targets": ["person"],
+    "effect_type": "color",
+    "color_hex": "#0000FF",
     "intensity": 0.8,
     "action": "add",
     "invert": false,
     "full_screen_filter": null,
     "full_screen_intensity": 0.5,
-    "reasoning": "User wants to pixelate the phone"
+    "full_screen_color": null,
+    "reasoning": "User wants to color the person blue"
 }}"""
 
             response = self._client.models.generate_content(
@@ -435,17 +877,25 @@ Rules:
                 intensity=float(data.get("intensity") or 0.8),
                 action=data.get("action") or "add",
                 invert=bool(data.get("invert", False)),
+                color_hex=data.get("color_hex"),  # NEW
                 full_screen_filter=data.get("full_screen_filter"),
                 full_screen_intensity=float(data.get("full_screen_intensity") or 0.5),
+                full_screen_color=data.get("full_screen_color"),  # NEW
                 reasoning=data.get("reasoning") or "",
+                needs_clarification=bool(data.get("needs_clarification", False)),
+                clarification_question=data.get("clarification_question") or "",
             )
+            plan = self._apply_language_modifiers(utterance, plan)
 
-            logger.info(f"Gemini plan: {plan.action} {plan.effect_type} → {plan.targets} (invert={plan.invert})")
+            if plan.needs_clarification:
+                logger.info(f"Gemini: needs clarification → \"{plan.clarification_question}\"")
+            else:
+                logger.info(f"Gemini plan: {plan.action} {plan.effect_type} → {plan.targets} (invert={plan.invert})")
             return plan
 
         except Exception as e:
             logger.error(f"Gemini planning error: {e}")
-            return self._emergency_parse(utterance)
+            return self._apply_language_modifiers(utterance, self._emergency_parse(utterance))
 
     def _emergency_parse(self, utterance: str) -> CommandPlan:
         """Extract targets from text when Gemini is down. Not a full NLP parser —
@@ -496,7 +946,7 @@ Rules:
         return CommandPlan(
             targets=targets,
             effect_type=effect,
-            intensity=0.8,
+            intensity=0.9,  # Increased from 0.8
             action=action,
             invert=invert,
             reasoning="Gemini unavailable — emergency parse",
@@ -571,6 +1021,15 @@ class VoiceAgent:
         # Cached frame for Gemini Vision
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_lock = threading.Lock()
+
+        # Persistent state for incremental commands (Phase 1 context)
+        self._persistent_state: dict = {
+            "per_target_state": {},      # {label: {effect_type, color_hex, intensity, invert}}
+            "full_screen_filter_state": {},  # {type, intensity, color_hex}
+            "last_utterance": "",
+            "last_sam_prompts": set(),
+        }
+        self._persistent_state_lock = threading.Lock()
 
     def set_on_command_callback(self, callback):
         """Set callback invoked when voice commands execute.
@@ -653,6 +1112,98 @@ class VoiceAgent:
     def get_conversation_state(self) -> dict:
         """Get current conversation state (for protobuf)."""
         return self._conversation_state.copy()
+
+    def clear_all_effects(self):
+        """Clear all active effects and full-screen filters (called on new client connection)."""
+        with self._state_lock:
+            self._active_effects.clear()
+            self._full_screen_filter = None
+            self._known_objects.clear()
+            logger.info("VoiceAgent: Cleared all effects, filters, and known objects")
+
+        # Also clear persistent state
+        with self._persistent_state_lock:
+            self._persistent_state["per_target_state"].clear()
+            self._persistent_state["full_screen_filter_state"].clear()
+            self._persistent_state["last_utterance"] = ""
+            self._persistent_state["last_sam_prompts"] = set()
+
+    def _update_persistent_state(self, utterance: str, plan: CommandPlan):
+        """Update persistent state after executing a command.
+
+        This enables incremental commands like "darker green" by tracking
+        the current color/intensity state for each target.
+        """
+        with self._persistent_state_lock:
+            self._persistent_state["last_utterance"] = utterance
+
+            # Update per-target state
+            if plan.action in ("add", "change"):
+                for target in plan.targets:
+                    self._persistent_state["per_target_state"][target] = {
+                        "effect_type": plan.effect_type,
+                        "color_hex": plan.color_hex or "",
+                        "intensity": plan.intensity,
+                        "invert": plan.invert,
+                    }
+            elif plan.action == "remove":
+                for target in plan.targets:
+                    self._persistent_state["per_target_state"].pop(target, None)
+
+            # Update full-screen filter state
+            if plan.full_screen_filter and plan.full_screen_filter != "none":
+                self._persistent_state["full_screen_filter_state"] = {
+                    "type": plan.full_screen_filter,
+                    "intensity": plan.full_screen_intensity,
+                    "color_hex": plan.full_screen_color or "",
+                }
+            elif plan.action == "remove" and not plan.targets:
+                # Clear command or filter removal
+                self._persistent_state["full_screen_filter_state"] = {}
+
+            # Update known SAM prompts (from orchestrator)
+            # This will be synced in _on_voice_command callback
+
+    def _get_persistent_state_snapshot(self) -> dict:
+        """Get a thread-safe copy of persistent state for Phase 1."""
+        with self._persistent_state_lock:
+            return {
+                "per_target_state": self._persistent_state["per_target_state"].copy(),
+                "full_screen_filter_state": self._persistent_state["full_screen_filter_state"].copy(),
+                "last_utterance": self._persistent_state["last_utterance"],
+                "last_sam_prompts": self._persistent_state["last_sam_prompts"].copy(),
+            }
+
+    def _vision_result_to_command_plan(self, vision_result: dict) -> CommandPlan:
+        """Convert vision plan from Gemini to CommandPlan structure.
+
+        Args:
+            vision_result: Dict from plan_from_vision with:
+                targets, effect_type, color_hex, intensity, action, invert,
+                full_screen_filter, full_screen_intensity, full_screen_color, reasoning
+
+        Returns:
+            CommandPlan object
+        """
+        return CommandPlan(
+            targets=vision_result.get("targets", []),
+            effect_type=vision_result.get("effect_type", "none"),
+            intensity=float(vision_result.get("intensity", 0.8)),
+            action=vision_result.get("action", "add"),
+            invert=bool(vision_result.get("invert", False)),
+            color_hex=vision_result.get("color_hex"),
+            full_screen_filter=vision_result.get("full_screen_filter"),
+            full_screen_intensity=float(vision_result.get("full_screen_intensity", 0.5)),
+            full_screen_color=vision_result.get("full_screen_color"),
+            reasoning=vision_result.get("reasoning", "Vision-based plan"),
+            needs_clarification=False,
+            clarification_question="",
+        )
+
+    def sync_sam_prompts_to_persistent_state(self, prompts: set[str]):
+        """Update persistent state with current SAM3 prompts (called from orchestrator)."""
+        with self._persistent_state_lock:
+            self._persistent_state["last_sam_prompts"] = prompts.copy()
 
     def add_known_object(self, label: str):
         """Add object to known registry (called when SAM3 segments it)."""
@@ -784,13 +1335,30 @@ class VoiceAgent:
         else:
             self._conversation_state["partial_transcript"] = self._assembler.get_partial()
 
+    # When user keeps talking and says "Hey Vibe" again mid-stream, use text after the last occurrence.
+    _LAST_INTENT_SPLIT = re.compile(r'\bhey\s+vi(?:be)?s?\b', re.IGNORECASE)
+
     def _execute_command(self, utterance: str):
-        """Execute command: Gemini plan → update state → apply effects."""
+        """Execute command: Gemini plan → update state → apply effects.
+
+        Two-phase vision flow (when scene understanding available):
+        Phase 1: Pre-command scene snapshot → vision-based plan
+        Phase 2: Post-execution verification (future enhancement)
+
+        Crashes if Gemini Vision unavailable (no silent fallback to text-only).
+        """
         # Normalize Whisper artifacts: strip punctuation, collapse whitespace
         utterance = re.sub(r'[.,!?;:]+', ' ', utterance).strip()
         utterance = re.sub(r'\s+', ' ', utterance)
         # "nothing but" / "not but" → "but" (Whisper splits "everything but" across sentences)
         utterance = re.sub(r'\bnothing\s+but\b', 'but', utterance, flags=re.IGNORECASE)
+
+        # Long run-on with a repeated wake phrase: use only the text after the last "Hey Vibe" / "Hey Vi"
+        if len(utterance) > 80:
+            parts = self._LAST_INTENT_SPLIT.split(utterance)
+            if len(parts) > 1 and parts[-1].strip():
+                utterance = parts[-1].strip()
+                logger.info(f"Using last intent from run-on: \"{utterance}\"")
 
         t0 = time.time()
 
@@ -799,16 +1367,103 @@ class VoiceAgent:
             known_objs = self._known_objects.copy()
             active_fx = self._active_effects.copy()
 
-        # Plan command using Gemini reasoning (single API call — no scene snapshot)
-        plan = self._planner.plan_command(
-            utterance,
-            known_objs,
-            active_fx,
-        )
+        # --- Phase 1: Vision-based planning (when available) ---
+        # Try fast-path first (preserves existing low-latency behavior)
+        fast = self._planner._try_fast_parse(utterance)
+        if fast:
+            plan = self._planner._apply_language_modifiers(utterance, fast)
+            logger.info(f"Fast-path plan: {plan.action} {plan.effect_type} → {plan.targets}")
+        elif self._scene and self._scene.available:
+            # Vision-enhanced planning: get current frame + persistent state
+            with self._frame_lock:
+                frame_bgr = self._latest_frame.copy() if self._latest_frame is not None else None
+
+            if frame_bgr is not None:
+                # Get persistent state for incremental commands
+                persistent_state = self._get_persistent_state_snapshot()
+
+                # Phase 1: Call Gemini Vision for scene analysis
+                logger.info("Phase 1: Running vision-based scene analysis...")
+                vision_result = self._scene.plan_from_vision(utterance, frame_bgr, persistent_state)
+
+                # Detect vision failure (plan_from_vision raises; this is a safety check)
+                reasoning = vision_result.get("reasoning", "")
+                if "unavailable" in reasoning.lower() or "failed" in reasoning.lower() or reasoning.startswith("Error:"):
+                    raise RuntimeError(
+                        f"Gemini Vision failed: {reasoning}. "
+                        "Pipeline configured to crash on vision unavailability."
+                    )
+
+                # Convert vision result to CommandPlan
+                plan = self._vision_result_to_command_plan(vision_result)
+                logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
+
+                # Add new SAM3 prompts if vision discovered new objects
+                new_prompts = vision_result.get("new_prompts_for_sam", [])
+                if new_prompts and self._on_command_callback:
+                    # Sync new prompts with orchestrator (done in callback)
+                    pass
+            else:
+                # No frame available — crash (no fallback)
+                raise RuntimeError(
+                    "Gemini Vision requires a frame; no frame available. "
+                    "Pipeline configured to crash on vision unavailability."
+                )
+        else:
+            # Vision unavailable — crash (no fallback)
+            raise RuntimeError(
+                "Gemini Vision is unavailable (no API key or not initialized). "
+                "Pipeline configured to crash on vision unavailability."
+            )
+
+        # --- Chain-of-thought: handle clarification requests ---
+        if plan.needs_clarification:
+            question = plan.clarification_question or "Can you be more specific about what you'd like me to do?"
+            self._conversation_state.update({
+                "last_command": utterance,
+                "last_response": question,
+                "last_command_time": time.time(),
+                "pending_clarification": True,
+                "clarification_question": question,
+            })
+            elapsed_ms = (time.time() - t0) * 1000
+            logger.info(f"Clarification needed ({elapsed_ms:.0f}ms): \"{question}\"")
+            return
+
+        # Clear pending clarification since we're now executing
+        self._conversation_state.pop("pending_clarification", None)
+        self._conversation_state.pop("clarification_question", None)
+
+        # Normalize "background" semantics for SAM3:
+        # "blur/dim background" should mean "apply effect to everything except person".
+        # Keep this centralized so fast-path, Gemini, and emergency parsing stay consistent.
+        if plan.targets:
+            mapped_background = False
+            normalized_targets = []
+            for target in plan.targets:
+                t = (target or "").strip().lower()
+                if t == "background":
+                    mapped_background = True
+                    normalized_targets.append("person")
+                elif t:
+                    normalized_targets.append(t)
+
+            if normalized_targets:
+                # Preserve order while deduplicating.
+                plan.targets = list(dict.fromkeys(normalized_targets))
+
+            if mapped_background and plan.action in ("add", "change"):
+                plan.invert = True
+                logger.info(
+                    "Normalized target 'background' -> 'person' with invert=true"
+                )
 
         # Execute plan: update state
         with self._state_lock:
             if plan.action == "add" or plan.action == "change":
+                # Clean stale legacy key so "blur background" no longer leaves
+                # a literal "background" effect active.
+                self._active_effects.pop("background", None)
                 # Add/update effects
                 for target in plan.targets:
                     self._known_objects.add(target)
@@ -816,9 +1471,11 @@ class VoiceAgent:
                         "type": plan.effect_type,
                         "intensity": plan.intensity,
                         "invert": plan.invert,
+                        "color_hex": plan.color_hex,  # NEW: store color_hex
                     }
                     mode = "inverted" if plan.invert else "direct"
-                    logger.info(f"Applied {plan.effect_type} ({mode}) to {target}")
+                    color_info = f" {plan.color_hex}" if plan.color_hex else ""
+                    logger.info(f"Applied {plan.effect_type} ({mode}) to {target}{color_info}")
 
             elif plan.action == "remove":
                 # Remove effects (but keep objects in known registry for persistence)
@@ -832,6 +1489,7 @@ class VoiceAgent:
                 self._full_screen_filter = {
                     "type": plan.full_screen_filter,
                     "intensity": plan.full_screen_intensity,
+                    "color_hex": plan.full_screen_color,  # NEW: store full_screen_color
                 }
                 logger.info(f"Applied full-screen filter: {plan.full_screen_filter}")
             elif plan.action == "remove" and not plan.targets:
@@ -844,10 +1502,13 @@ class VoiceAgent:
         if self._on_command_callback:
             try:
                 self._on_command_callback(
-                    plan.action, plan.targets, plan.effect_type, plan.intensity, plan.invert,
+                    plan.action, plan.targets, plan.effect_type, plan.intensity, plan.invert, plan.color_hex,
                 )
             except Exception as e:
                 logger.error(f"on_command callback error: {e}")
+
+        # Update persistent state for incremental commands
+        self._update_persistent_state(utterance, plan)
 
         # Update conversation state
         response = self._generate_response(plan)
