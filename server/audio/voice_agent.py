@@ -1224,9 +1224,12 @@ class VoiceAgent:
         else:
             self._conversation_state["partial_transcript"] = self._assembler.get_partial()
 
+    # When user keeps talking and says "Hey Vibe" again mid-stream, use text after the last occurrence.
+    _LAST_INTENT_SPLIT = re.compile(r'\bhey\s+vi(?:be)?s?\b', re.IGNORECASE)
+
     def _execute_command(self, utterance: str):
         """Execute command: Gemini plan → update state → apply effects.
-        
+
         Chain-of-thought: if the planner returns needs_clarification=True,
         we don't execute any command — instead we send a follow-up question
         to the user and wait for their response in the next utterance.
@@ -1236,6 +1239,13 @@ class VoiceAgent:
         utterance = re.sub(r'\s+', ' ', utterance)
         # "nothing but" / "not but" → "but" (Whisper splits "everything but" across sentences)
         utterance = re.sub(r'\bnothing\s+but\b', 'but', utterance, flags=re.IGNORECASE)
+
+        # Long run-on with a repeated wake phrase: use only the text after the last "Hey Vibe" / "Hey Vi"
+        if len(utterance) > 80:
+            parts = self._LAST_INTENT_SPLIT.split(utterance)
+            if len(parts) > 1 and parts[-1].strip():
+                utterance = parts[-1].strip()
+                logger.info(f"Using last intent from run-on: \"{utterance}\"")
 
         t0 = time.time()
 

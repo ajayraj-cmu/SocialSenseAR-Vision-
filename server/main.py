@@ -88,7 +88,7 @@ def main():
         gpu_id=args.gpu_id,
         pipeline_mode="legacy" if args.legacy else args.pipeline,
         fastsam_device=args.device,
-        audio_enabled=not args.no_audio,
+        audio_enabled=(not args.no_audio) and (os.getenv("AUDIO_ENABLED", "true").lower() in ("true", "1", "yes")),
         emotion_enabled=not args.no_emotion,
         debug_view=args.debug_view,
         metrics_log_path=args.metrics_log,
