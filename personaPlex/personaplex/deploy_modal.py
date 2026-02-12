@@ -37,8 +37,6 @@ image = (
         "aiohttp>=3.10.5,<3.11",
     )
     .env({"NO_TORCH_COMPILE": "1"})
-    .copy_local_dir("moshi", "/app/moshi")
-    .run_commands("pip install /app/moshi")
 )
 
 
@@ -70,17 +68,39 @@ def download_models():
 
 @app.function(
     image=image,
-    gpu=modal.gpu.A100(count=1, size="40GB"),
+    gpu="A100-40GB",
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=3600,
-    container_idle_timeout=300,
+    scaledown_window=300,
 )
 @modal.web_server(port=8998, startup_timeout=600)
 def serve():
     import subprocess
     import sys
+    from pathlib import Path
+    
+    # Modal uploads the entire directory tree - moshi should be here
+    moshi_path = Path(__file__).parent / "moshi"
+    print(f"Installing moshi from {moshi_path}")
+    if moshi_path.exists():
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", str(moshi_path)],
+            capture_output=True,
+            text=True
+        )
+        print(f"Moshi install stdout: {result.stdout}")
+        print(f"Moshi install stderr: {result.stderr}")
+        if result.returncode != 0:
+            print(f"WARNING: moshi install failed with code {result.returncode}")
+    else:
+        print(f"ERROR: moshi directory not found at {moshi_path}")
+        print(f"Current directory: {Path.cwd()}")
+        print(f"__file__: {__file__}")
+        print(f"Contents: {list(Path(__file__).parent.iterdir())}")
 
+    # Start Moshi server
+    print("Starting Moshi server on port 8998...")
     subprocess.Popen([
         sys.executable, "-m", "moshi.server",
         "--host", "0.0.0.0",

@@ -104,7 +104,7 @@ class SAM3Segmenter:
         #
         # Typed/voice commands can still add/remove prompts at runtime, and a
         # "clear" will still set this to empty.
-        self._active_prompts: list[str] = []
+        self._active_prompts: list[str] = ["person"]  # Start with "person" for connectivity testing
         self._prompts_lock = threading.Lock()
 
         # Mask cache: prompt -> (mask_u8, timestamp, frame_gen) for non-queried prompts

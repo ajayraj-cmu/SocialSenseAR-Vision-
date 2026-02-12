@@ -84,6 +84,7 @@ image = (
     .env({"TRANSFORMERS_CACHE": f"{config.CACHE_MOUNT_PATH}/huggingface"})
     .env({"TORCH_HOME": f"{config.CACHE_MOUNT_PATH}/torch"})
     .add_local_dir("server", remote_path="/root/server")
+    .add_local_dir("config", remote_path="/root/config")
     .add_local_file("modal_config.py", remote_path="/root/modal_config.py")
 )
 
@@ -183,6 +184,8 @@ class SocialSenseGPU:
         logger.info(f"HF_SAM_TOKEN: {'SET' if hf_sam else 'MISSING'}")
         logger.info(f"HF_PERSONAPLEX_TOKEN: {'SET' if hf_pp else 'MISSING'}")
         logger.info(f"HF_TOKEN (fallback): {'SET' if os.getenv('HF_TOKEN') else 'MISSING'}")
+        if not hf_sam:
+            logger.warning("HF_SAM_TOKEN (or HF_TOKEN) is required for SAM3. Add it to Modal secret 'socialsense-secrets' and request access to facebook/sam3 on HuggingFace.")
 
         # Set HF_TOKEN for SAM3 model loading (huggingface-hub uses HF_TOKEN env var)
         if hf_sam and not os.getenv("HF_TOKEN"):
@@ -192,10 +195,19 @@ class SocialSenseGPU:
         logger.info("Loading SAM3 model (this takes ~60-90s on cold start)...")
         self.pipeline = PipelineOrchestrator(self.server_config)
 
+        # Initialize pipeline now so model loads at startup. If HF_SAM_TOKEN is missing
+        # or facebook/sam3 access is not granted, this will fail and the container
+        # won't become ready (check Modal logs).
+        try:
+            self.pipeline.initialize()
+        except Exception as e:
+            logger.error("Pipeline initialization failed (check HF_SAM_TOKEN / HF_TOKEN in Modal secret and facebook/sam3 access): %s", e, exc_info=True)
+            raise
+
         # Persist downloaded models so next cold start is faster
         cache_volume.commit()
 
-        logger.info("Pipeline ready!")
+        logger.info("Pipeline ready! Segmentation will work on first frame.")
         logger.info("=" * 70)
 
     @modal.asgi_app()
