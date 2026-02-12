@@ -73,6 +73,8 @@ image = (
         "openai>=1.0.0",
         "webrtcvad>=2.0.10",
         "mediapipe>=0.10.0",
+        "sphn>=0.1.4,<0.2",
+        "aiohttp>=3.9.0",
         "fastapi[standard]>=0.115.0",
         "uvicorn>=0.32.0",
         "tensorrt-cu12>=10.0",
@@ -167,10 +169,25 @@ class SocialSenseGPU:
             metrics_log_path=config.METRICS_LOG_PATH,
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             gemini_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
+            hf_sam_token=os.getenv("HF_SAM_TOKEN") or os.getenv("HF_TOKEN"),
+            hf_personaplex_token=os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN"),
+            # PersonaPlex — enable if env var is set
+            personaplex_enabled=os.getenv("PERSONAPLEX_ENABLED", "").lower() in ("true", "1", "yes"),
+            personaplex_url=os.getenv("PERSONAPLEX_URL", "ws://localhost:8998/api/chat"),
         )
 
+        # Log HF token status (separate tokens for SAM3 vs PersonaPlex)
+        hf_sam = os.getenv("HF_SAM_TOKEN") or os.getenv("HF_TOKEN")
+        hf_pp = os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN")
         logger.info(f"Pipeline: sam3 | GPU: cuda | SAM3: {self.server_config.sam3_model}")
-        logger.info(f"HF_TOKEN: {'SET' if os.getenv('HF_TOKEN') else 'MISSING'}")
+        logger.info(f"HF_SAM_TOKEN: {'SET' if hf_sam else 'MISSING'}")
+        logger.info(f"HF_PERSONAPLEX_TOKEN: {'SET' if hf_pp else 'MISSING'}")
+        logger.info(f"HF_TOKEN (fallback): {'SET' if os.getenv('HF_TOKEN') else 'MISSING'}")
+
+        # Set HF_TOKEN for SAM3 model loading (huggingface-hub uses HF_TOKEN env var)
+        if hf_sam and not os.getenv("HF_TOKEN"):
+            os.environ["HF_TOKEN"] = hf_sam
+            logger.info("Set HF_TOKEN from HF_SAM_TOKEN for SAM3 model loading")
 
         logger.info("Loading SAM3 model (this takes ~60-90s on cold start)...")
         self.pipeline = PipelineOrchestrator(self.server_config)
@@ -293,7 +310,8 @@ class SocialSenseGPU:
                             if seg.effect is not None:
                                 pb_seg.effect.effect_type = seg.effect.effect_type
                                 pb_seg.effect.intensity = seg.effect.intensity
-                                pb_seg.effect.color_hex = seg.effect.color_hex
+                                if seg.effect.color_hex:
+                                    pb_seg.effect.color_hex = seg.effect.color_hex
                                 for k, v in seg.effect.params.items():
                                     pb_seg.effect.params[k] = v
 
@@ -321,6 +339,9 @@ class SocialSenseGPU:
                             if fs_filter:
                                 response.conversation.voice_agent.full_screen_filter.filter_type = fs_filter.get("type", "none")
                                 response.conversation.voice_agent.full_screen_filter.intensity = fs_filter.get("intensity", 0.5)
+                                color_hex = fs_filter.get("color_hex")
+                                if color_hex:
+                                    response.conversation.voice_agent.full_screen_filter.color_hex = color_hex
 
                         response.metrics.total_ms = proc_ms
                         response.metrics.segment_count = len(response.segments)

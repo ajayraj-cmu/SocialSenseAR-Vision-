@@ -1346,6 +1346,10 @@ class VoiceAgent:
         Phase 2: Post-execution verification (future enhancement)
 
         Crashes if Gemini Vision unavailable (no silent fallback to text-only).
+
+        Chain-of-thought: if the planner returns needs_clarification=True,
+        we don't execute any command — instead we send a follow-up question
+        to the user and wait for their response in the next utterance.
         """
         # Normalize Whisper artifacts: strip punctuation, collapse whitespace
         utterance = re.sub(r'[.,!?;:]+', ' ', utterance).strip()

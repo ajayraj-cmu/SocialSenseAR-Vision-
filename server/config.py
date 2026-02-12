@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Valid effect types (used by voice agent, dashboard, websocket server)
-EFFECT_TYPES = ("blur", "dim", "pixelate", "highlight", "outline")
+EFFECT_TYPES = ("blur", "dim", "pixelate", "highlight", "outline", "color")
+
+# Expanded effect types for custom masks (voice-parsable, some Unity-side pending)
+CUSTOM_EFFECT_TYPES = (
+    "frosted_glass", "redact", "grayscale", "spotlight",
+    "noise", "desaturate", "vignette", "soft_glow",
+    "reduce_contrast", "warm_tint", "cool_tint",
+)
 
 
 @dataclass
@@ -41,9 +48,16 @@ class ServerConfig:
     gemini_label_match_cost: float = 0.20  # max cost for Gemini label→track matching
     rle_scale: float = 0.75             # RLE encoding downscale factor (0.75 = 3/4 resolution)
 
+    # RLE mask smoothing (optional quality tuning — see docs/BORDER_SMOOTHNESS_AND_LATENCY_SUGGESTIONS.md)
+    rle_edge_blur_kernel: int = 7       # Gaussian blur kernel size before threshold (5, 7, or 9; higher = softer edges). Raised from 5 to 7 for smoother borders.
+    rle_smooth_edges_only: bool = False  # If True, skip morphology and only blur (can look smoother on some masks)
+    rle_morph_kernel_size: int = 5       # Morphology kernel size for MORPH_CLOSE/MORPH_OPEN (3, 5, or 7)
+    rle_min_mask_area: int = 64          # Minimum mask pixel count after RLE resize; smaller masks are discarded (reduces sparse fragments)
+
     # Display confidence thresholds
     display_confidence_min: float = 0.75   # min confidence for client-side segment rendering
     dashboard_confidence_min: float = 0.10 # min confidence for debug dashboard display
+    effect_confidence_min: float = 0.60    # min confidence for applying effects/masks to segments
 
     # FastSAM (legacy mode — matches sam_gemini_voice.py defaults)
     fastsam_model: str = "FastSAM-s.pt"
@@ -89,6 +103,15 @@ class ServerConfig:
     # OpenAI
     openai_summary_model: str = "gpt-4o-mini"
 
+    # PersonaPlex (speech-to-speech voice agent via NVIDIA PersonaPlex-7B)
+    personaplex_enabled: bool = False  # Off by default; enable to use PersonaPlex instead of faster-whisper
+    personaplex_url: str = "ws://localhost:8998/api/chat"  # Override with Modal URL or remote host
+    personaplex_voice_prompt: str = "NATF0.pt"
+    personaplex_text_temperature: float = 0.7
+    personaplex_text_topk: int = 25
+    personaplex_audio_temperature: float = 0.8
+    personaplex_audio_topk: int = 250
+
     # Debug
     debug_view: bool = False  # Show Quest camera feed + overlays in cv2 window
     metrics_log_path: Optional[str] = None  # JSONL file for structured metrics
@@ -96,3 +119,10 @@ class ServerConfig:
     # Env vars (loaded at runtime)
     openai_api_key: Optional[str] = None
     gemini_api_key: Optional[str] = None
+
+    # Hugging Face tokens — separate tokens for PersonaPlex vs SAM3
+    # HF_PERSONAPLEX_TOKEN: gated access for nvidia/personaplex-7b-v1
+    # HF_SAM_TOKEN: gated access for facebook/sam3
+    # Both fall back to HF_TOKEN if the specific token is not set.
+    hf_personaplex_token: Optional[str] = None
+    hf_sam_token: Optional[str] = None

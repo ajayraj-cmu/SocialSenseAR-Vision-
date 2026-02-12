@@ -1,0 +1,3 @@
+[submodule "unity-client"]
+	path = unity-client
+	url = https://github.com/inuvation/SocialSenseAR-Unity.git

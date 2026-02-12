@@ -47,7 +47,9 @@ CACHE_MOUNT_PATH = "/cache"
 # Required keys:
 # - OPENAI_API_KEY: For Whisper transcription
 # - GEMINI_API_KEY or GOOGLE_API_KEY: For scene understanding
-# - HF_TOKEN: For gated HuggingFace models (facebook/sam3)
+# - HF_SAM_TOKEN: For gated SAM3 model (facebook/sam3) — falls back to HF_TOKEN
+# - HF_PERSONAPLEX_TOKEN: For PersonaPlex model (nvidia/personaplex-7b-v1) — falls back to HF_TOKEN
+# - HF_TOKEN: Legacy fallback used if specific tokens above are not set
 SECRET_NAME = "socialsense-secrets"
 
 # ============================================================

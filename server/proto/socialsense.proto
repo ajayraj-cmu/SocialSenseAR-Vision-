@@ -131,9 +131,9 @@ message PerformanceMetrics {
 // ============================================================
 
 message EffectMetadata {
-  string effect_type = 1;       // "blur", "dim", "pixelate", "highlight", "outline", "none"
+  string effect_type = 1;       // "blur", "dim", "pixelate", "highlight", "outline", "color", "none"
   float intensity = 2;          // 0.0-1.0
-  string color_hex = 3;         // hex color for outline/highlight (e.g., "#FF0000")
+  string color_hex = 3;         // hex color for outline/highlight/color effects (e.g., "#FF0000")
   map<string, string> params = 4;  // additional effect parameters
 }
 
@@ -150,6 +150,7 @@ message VoiceAgentState {
 }
 
 message FullScreenFilter {
-  string filter_type = 1;       // "dim", "warm", "cool", "night", "grayscale", "none"
+  string filter_type = 1;       // "dim", "warm", "cool", "night", "grayscale", "color", "none"
   float intensity = 2;          // 0.0-1.0
+  string color_hex = 3;         // hex color if filter_type is "color" (e.g., "#0000FF")
 }

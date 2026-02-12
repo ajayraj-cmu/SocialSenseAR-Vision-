@@ -17,10 +17,16 @@ This doc explains how someone else can run the app **on their computer** after y
    So the CLI can run `modal deploy` / `modal run` / `modal serve`. That uses a **Modal token** (tied to a Modal account).
 
 2. **Modal Secret named `socialsense-secrets`**  
-   The app expects a secret with at least:
-   - `HF_TOKEN` (Hugging Face, for SAM3)
-   - `OPENAI_API_KEY` (optional, for Whisper/voice)
-   - `GEMINI_API_KEY` (optional, for Gemini Vision)
+   The app expects a secret with the following keys:
+   - `HF_SAM_TOKEN` — Hugging Face token for gated SAM3 model (`facebook/sam3`). **Required.**
+   - `HF_PERSONAPLEX_TOKEN` — Hugging Face token for PersonaPlex model (`nvidia/personaplex-7b-v1`). Required only if PersonaPlex is enabled.
+   - `HF_TOKEN` — Legacy fallback. Used if `HF_SAM_TOKEN` or `HF_PERSONAPLEX_TOKEN` are not set.
+   - `OPENAI_API_KEY` (optional, for Whisper/voice transcription)
+   - `GEMINI_API_KEY` (optional, for Gemini Vision scene understanding and command planning)
+   - `PERSONAPLEX_ENABLED` — Set to `true` to enable PersonaPlex voice backend (default: `false`)
+   - `PERSONAPLEX_URL` — PersonaPlex WebSocket URL (default: `ws://localhost:8998/api/chat`)
+
+   At startup, the Modal container logs `SET` or `MISSING` for each token so you can verify.
 
 Those can come from **your** Modal account or from **theirs**.
 
@@ -80,7 +86,8 @@ modal setup
 
 # 2) Create a secret with the same name and keys you provided
 modal secret create socialsense-secrets \
-  HF_TOKEN=<value-you-sent> \
+  HF_SAM_TOKEN=<value-you-sent> \
+  HF_PERSONAPLEX_TOKEN=<value-you-sent> \
   OPENAI_API_KEY=<value-you-sent> \
   GEMINI_API_KEY=<value-you-sent>
 
