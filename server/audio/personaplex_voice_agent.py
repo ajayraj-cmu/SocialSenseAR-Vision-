@@ -116,9 +116,10 @@ class PersonaPlexVoiceAgent:
     Drop-in replacement for VoiceAgent. Same interface for the orchestrator.
     """
 
-    def __init__(self, bridge: PersonaPlexBridge, config: ServerConfig):
+    def __init__(self, bridge: PersonaPlexBridge, config: ServerConfig, planner=None):
         self._bridge = bridge
         self._config = config
+        self._planner = planner  # VoiceCommandPlanner (Gemini) for typed text commands
 
         # State registries (same as VoiceAgent)
         self._known_objects: set[str] = set()
@@ -152,8 +153,10 @@ class PersonaPlexVoiceAgent:
         self._bridge._on_command = None  # We parse commands ourselves from text
 
     def start(self):
-        """Start the PersonaPlex bridge."""
+        """Start the PersonaPlex bridge and initialize Gemini planner."""
         self._bridge.start()
+        if self._planner is not None:
+            self._planner.initialize()
         logger.info("PersonaPlexVoiceAgent started")
 
     def ingest_audio(self, pcm16_data: bytes, sample_rate: int, num_samples: int):
@@ -213,29 +216,53 @@ class PersonaPlexVoiceAgent:
             self._known_objects.add(label)
 
     def process_text_command(self, text: str):
-        """Process a typed text command (bypass PersonaPlex, use regex parsing)."""
+        """Process a typed text command through Gemini NLP (same as VoiceAgent).
+
+        PersonaPlex handles speech-to-speech, but typed commands go through
+        VoiceCommandPlanner (Gemini) for proper natural language understanding.
+        Falls back to regex parsing if Gemini is unavailable.
+        """
         text = text.strip()
         if not text:
             return
 
-        logger.info(f"Text command (direct): {text}")
-        plans = self._parse_text_for_commands(f"[COMMAND:blur:{text}]")
-        if not plans:
-            # Try to interpret as a raw command like "blur laptop"
-            parts = text.lower().split(None, 1)
-            if len(parts) == 2 and parts[0] in ("blur", "dim", "pixelate", "highlight", "outline"):
-                plans = [CommandPlan(
-                    targets=[parts[1]], effect_type=parts[0],
-                    intensity=0.8, action="add",
-                )]
-            elif text.lower() in ("clear", "reset"):
-                plans = [CommandPlan(
-                    targets=[], effect_type="blur",
-                    intensity=0.0, action="remove",
-                )]
+        logger.info(f"Text command: {text}")
 
-        for plan in plans:
+        # 1. If text already contains [COMMAND:...] tags, parse those directly
+        plans = self._parse_text_for_commands(text)
+        if plans:
+            for plan in plans:
+                self._execute_plan(plan)
+            return
+
+        # 2. Route through Gemini planner (same pipeline as VoiceAgent)
+        if self._planner is not None:
+            if not self._planner.available:
+                self._planner.initialize()
+
+            with self._state_lock:
+                known = self._known_objects.copy()
+                effects = self._active_effects.copy()
+
+            plan = self._planner.plan_command(text, known, effects)
+            logger.info(f"Gemini plan: {plan.action} {plan.effect_type} → {plan.targets} "
+                        f"(invert={plan.invert}, reason={plan.reasoning})")
             self._execute_plan(plan)
+            return
+
+        # 3. Fallback: no planner available — basic regex
+        logger.warning("No Gemini planner available — using basic regex fallback")
+        parts = text.lower().split(None, 1)
+        if len(parts) == 2 and parts[0] in _COMMAND_MAP:
+            effect_type, action, invert = _COMMAND_MAP[parts[0]]
+            self._execute_plan(CommandPlan(
+                targets=[parts[1]], effect_type=effect_type,
+                intensity=0.9, action=action, invert=invert,
+            ))
+        elif text.lower() in ("clear", "reset"):
+            self._execute_plan(CommandPlan(
+                targets=[], effect_type="blur", intensity=0.0, action="remove",
+            ))
 
     def update_frame(self, frame_bgr):
         """Cache latest camera frame."""

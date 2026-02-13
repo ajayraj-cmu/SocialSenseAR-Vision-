@@ -139,42 +139,69 @@ class Dashboard:
                 effect_type = ""
                 is_inverted = False
                 intensity = 1.0
+                color_hex = ""
                 if effect:
                     effect_type = getattr(effect, 'effect_type', '')
+                    color_hex = getattr(effect, 'color_hex', '')
                     params = getattr(effect, 'params', {})
                     is_inverted = params.get("invert", "") == "true" if params else False
                     try:
                         intensity = float(params.get("intensity", 1.0)) if params else 1.0
                     except (ValueError, TypeError):
                         intensity = 1.0
+                    # Also read intensity from effect object directly (protobuf field)
+                    eff_intensity = getattr(effect, 'intensity', 0.0)
+                    if eff_intensity > 0:
+                        intensity = eff_intensity
 
                 if effect_type and effect_type != "none":
                     mask_bool = mask_u8 > 128
                     if is_inverted:
                         mask_bool = ~mask_bool
 
-                    if effect_type == "blur":
+                    if effect_type == "blur" or effect_type == "frosted_glass":
                         ksize = max(3, int(51 * intensity)) | 1  # must be odd
                         blurred = cv2.GaussianBlur(display_frame, (ksize, ksize), 0)
                         display_frame[mask_bool] = blurred[mask_bool]
 
                     elif effect_type == "dim":
-                        dimmed = (display_frame * (1.0 - 0.7 * intensity)).astype(np.uint8)
+                        dimmed = (display_frame.astype(np.float32) * (1.0 - 0.7 * intensity)).clip(0, 255).astype(np.uint8)
                         display_frame[mask_bool] = dimmed[mask_bool]
 
-                    elif effect_type == "pixelate":
+                    elif effect_type == "pixelate" or effect_type == "redact":
                         block = max(4, int(20 * intensity))
                         h, w = display_frame.shape[:2]
-                        small = cv2.resize(display_frame, (w // block, h // block), interpolation=cv2.INTER_LINEAR)
+                        small = cv2.resize(display_frame, (max(1, w // block), max(1, h // block)), interpolation=cv2.INTER_LINEAR)
                         pixelated = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
                         display_frame[mask_bool] = pixelated[mask_bool]
 
                     elif effect_type == "highlight":
                         bright = cv2.addWeighted(display_frame, 1.0, np.full_like(display_frame, 255), 0.3 * intensity, 0)
                         tint = bright.copy()
-                        tint[:, :, 0] = np.clip(tint[:, :, 0].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)  # yellow-ish tint (add green)
-                        tint[:, :, 2] = np.clip(tint[:, :, 2].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)  # add red
+                        tint[:, :, 0] = np.clip(tint[:, :, 0].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)
+                        tint[:, :, 2] = np.clip(tint[:, :, 2].astype(np.int16) + int(40 * intensity), 0, 255).astype(np.uint8)
                         display_frame[mask_bool] = tint[mask_bool]
+
+                    elif effect_type == "color":
+                        # Parse hex color from protobuf color_hex field
+                        r, g, b = 173, 216, 230  # default pastel blue
+                        if color_hex and len(color_hex) >= 7:
+                            h_str = color_hex.lstrip("#")
+                            try:
+                                r = int(h_str[0:2], 16)
+                                g = int(h_str[2:4], 16)
+                                b = int(h_str[4:6], 16)
+                            except (ValueError, IndexError):
+                                pass
+                        tint = np.array([b, g, r], dtype=np.float32)  # BGR
+                        blended = display_frame.astype(np.float32) * (1 - intensity) + tint * intensity
+                        display_frame[mask_bool] = np.clip(blended, 0, 255).astype(np.uint8)[mask_bool]
+
+                    elif effect_type == "grayscale" or effect_type == "desaturate":
+                        gray = cv2.cvtColor(display_frame, cv2.COLOR_BGR2GRAY)
+                        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                        blended = cv2.addWeighted(gray_bgr, intensity, display_frame, 1 - intensity, 0)
+                        display_frame[mask_bool] = blended[mask_bool]
 
                     elif effect_type == "outline":
                         pass  # outline is drawn below in contour section

@@ -96,12 +96,21 @@ class PipelineOrchestrator:
                     audio_temperature=config.personaplex_audio_temperature,
                     audio_topk=config.personaplex_audio_topk,
                 )
+
+                # Create Gemini planner for typed text commands (PersonaPlex is speech-only)
+                from server.audio.voice_agent import VoiceCommandPlanner
+                self._voice_planner = VoiceCommandPlanner(
+                    api_key=config.gemini_api_key,
+                    model=config.gemini_planning_model,
+                )
+
                 self._voice_agent = PersonaPlexVoiceAgent(
                     bridge=self._personaplex_bridge,
                     config=config,
+                    planner=self._voice_planner,
                 )
                 self._voice_agent.set_on_command_callback(self._on_voice_command)
-                logger.info("Voice agent: PersonaPlex (speech-to-speech)")
+                logger.info("Voice agent: PersonaPlex (speech-to-speech) + Gemini (typed commands)")
             else:
                 # --- Standard voice backend (faster-whisper / OpenAI Whisper + Gemini planning) ---
                 from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner

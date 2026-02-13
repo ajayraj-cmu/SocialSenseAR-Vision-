@@ -187,6 +187,7 @@ def resolve_effects(effects_timeline: list, frame_idx: int) -> dict:
             "effect_type": entry.get("effect_type", "outline"),
             "intensity": entry.get("intensity", 1.0),
             "color_hex": entry.get("color_hex", ""),
+            "color": entry.get("color"),
             "invert": entry.get("invert", False),
         }
 

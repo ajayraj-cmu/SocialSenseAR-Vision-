@@ -100,8 +100,10 @@ def apply_effect(frame, mask_bool, effect):
         if color_rgb and isinstance(color_rgb, (list, tuple)) and len(color_rgb) == 3:
             r, g, b = int(color_rgb[0]), int(color_rgb[1]), int(color_rgb[2])
         else:
-            color_hex = effect.get("color_hex", "#ADD8E6")  # default pastel blue
+            color_hex = effect.get("color_hex", "") or ""
             h_str = color_hex.lstrip("#")
+            if len(h_str) < 6:
+                h_str = "ADD8E6"  # default pastel blue
             r, g, b = int(h_str[0:2], 16), int(h_str[2:4], 16), int(h_str[4:6], 16)
         tint = np.array([b, g, r], dtype=np.float32)
         blended = frame.astype(np.float32) * (1 - intensity) + tint * intensity

@@ -84,6 +84,12 @@ class PersonaPlexBridge:
         self._thread: Optional[threading.Thread] = None
         self._send_queue: asyncio.Queue = asyncio.Queue()
 
+        # Diagnostics
+        self._audio_frames_sent = 0
+        self._audio_msgs_recv = 0
+        self._text_tokens_recv = 0
+        self._last_diag_time = 0.0
+
         # Opus encoder/decoder (lazy init — requires sphn)
         self._opus_writer = None
         self._opus_reader = None
@@ -149,16 +155,20 @@ class PersonaPlexBridge:
 
                     if kind == _MSG_HANDSHAKE:
                         self._ready = True
+                        self._last_diag_time = time.time()
                         logger.info("PersonaPlex handshake received — ready for audio")
 
                     elif kind == _MSG_AUDIO:
                         # Opus audio response from PersonaPlex
+                        self._audio_msgs_recv += 1
                         opus_bytes = data[1:]
                         self._opus_reader.append_bytes(opus_bytes)
 
                         # Decode available PCM
                         pcm_24k = self._opus_reader.read_pcm()
                         if pcm_24k.shape[-1] > 0:
+                            if self._audio_msgs_recv == 1:
+                                logger.info(f"PersonaPlex: first audio response ({pcm_24k.shape[-1]} samples)")
                             # Resample 24kHz → 16kHz
                             pcm_16k = _resample_linear(pcm_24k, _PERSONAPLEX_SAMPLE_RATE, _UNITY_SAMPLE_RATE)
                             # Convert to PCM16 bytes
@@ -177,8 +187,11 @@ class PersonaPlexBridge:
 
                     elif kind == _MSG_TEXT:
                         # Text token from PersonaPlex
+                        self._text_tokens_recv += 1
                         text_token = data[1:].decode("utf-8", errors="replace")
                         self._text_buffer += text_token
+                        if self._text_tokens_recv <= 5:
+                            logger.info(f"PersonaPlex text token #{self._text_tokens_recv}: '{text_token}' (accumulated: '{self._text_buffer[:100]}')")
 
                         if self._on_text:
                             try:
@@ -188,6 +201,13 @@ class PersonaPlexBridge:
 
                     else:
                         logger.warning(f"Unknown PersonaPlex message kind: {kind}")
+
+                    # Periodic diagnostics
+                    now = time.time()
+                    if now - self._last_diag_time >= 10.0:
+                        self._last_diag_time = now
+                        logger.info(f"PersonaPlex diag: sent={self._audio_frames_sent} frames, "
+                                    f"recv_audio={self._audio_msgs_recv}, recv_text={self._text_tokens_recv}")
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                   aiohttp.WSMsgType.ERROR):
@@ -245,9 +265,15 @@ class PersonaPlexBridge:
             opus_bytes = self._opus_writer.read_bytes()
 
             if len(opus_bytes) > 0:
+                self._audio_frames_sent += 1
+                if self._audio_frames_sent == 1:
+                    logger.info(f"PersonaPlex: sending first Opus frame ({len(opus_bytes)}B)")
                 msg = bytes([_MSG_AUDIO]) + opus_bytes
                 if self._loop is not None:
                     self._loop.call_soon_threadsafe(self._send_queue.put_nowait, msg)
+                else:
+                    if self._audio_frames_sent <= 3:
+                        logger.warning("PersonaPlex: _loop is None, audio frame dropped")
 
     def get_audio_response(self) -> Optional[bytes]:
         """Get and clear buffered audio response (PCM16 16kHz mono).
