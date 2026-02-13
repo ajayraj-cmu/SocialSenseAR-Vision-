@@ -109,6 +109,24 @@ def apply_effect(frame, mask_bool, effect):
         blended = frame.astype(np.float32) * (1 - intensity) + tint * intensity
         frame[mask_bool] = np.clip(blended, 0, 255).astype(np.uint8)[mask_bool]
 
+    elif effect_type == "frosted_glass":
+        ksize = max(3, int(51 * intensity)) | 1
+        blurred = cv2.GaussianBlur(frame, (ksize, ksize), 0)
+        frame[mask_bool] = blurred[mask_bool]
+
+    elif effect_type == "redact":
+        block = max(4, int(20 * intensity))
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (max(1, w // block), max(1, h // block)), interpolation=cv2.INTER_LINEAR)
+        pixelated = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+        frame[mask_bool] = pixelated[mask_bool]
+
+    elif effect_type in ("grayscale", "desaturate"):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        blended = cv2.addWeighted(gray_bgr, intensity, frame, 1 - intensity, 0)
+        frame[mask_bool] = blended[mask_bool]
+
     return frame
 
 
