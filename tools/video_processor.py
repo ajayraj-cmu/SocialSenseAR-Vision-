@@ -45,6 +45,10 @@ import numpy as np
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Load .env so GEMINI_API_KEY, OPENAI_API_KEY etc. are available
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from tools.story_schema import (
     Story, StoryMetadata, make_timestamp, save_story, resolve_effects,
 )
@@ -672,6 +676,11 @@ def transcribe_audio(
 
         # Normalize "background" → "person" with invert=True
         # (same logic as voice_agent._execute_plan, lines 1438-1460)
+        # Also handle: Gemini returns invert=True with empty targets for "blur background"
+        if plan.invert and not plan.targets:
+            plan.targets = ["person"]
+            print(f"    (invert with no targets → default target 'person')")
+
         if plan.targets:
             mapped_background = False
             normalized = []

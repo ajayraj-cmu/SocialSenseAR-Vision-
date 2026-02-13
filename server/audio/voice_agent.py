@@ -933,10 +933,15 @@ Examples with Intensity & Brightness:
         # Strip action/filler words, keep object nouns
         skip = {
             "blur", "dim", "darken", "pixelate", "highlight", "outline",
-            "unblur", "stop", "remove", "off", "undim", "clear",
+            "unblur", "stop", "remove", "off", "undim", "clear", "color",
             "everything", "all", "but", "except", "around", "the",
             "a", "an", "my", "that", "this", "please", "can", "you",
-            "other", "than", "besides", "me", "it", "on",
+            "could", "would", "should", "do", "does", "make", "put",
+            "set", "give", "add", "apply", "turn", "change", "get",
+            "other", "than", "besides", "me", "it", "on", "to", "in",
+            "semi", "transparent", "pastel", "opaque", "slightly",
+            "kind", "of", "like", "really", "very", "bit",
+            "hey", "vibe", "thank", "thanks", "okay",
         }
         targets = [w for w in text.split() if w not in skip]
 

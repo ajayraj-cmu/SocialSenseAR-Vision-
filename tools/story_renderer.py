@@ -263,13 +263,31 @@ def render_story(
             effects_timeline = json.load(f)
         print(f"Loaded effects from: {effects_file}")
 
-    # Video writer
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    if not out.isOpened():
-        # Try alternative codec
-        fourcc = cv2.VideoWriter_fourcc(*"XVID")
-        output_path = output_path.replace(".mp4", ".avi")
+    # Video writer — use ffmpeg pipe for H.264 (much better quality than mp4v)
+    ffmpeg_proc = None
+    out = None
+    try:
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        print("Using H.264 encoder (ffmpeg pipe)")
+    except FileNotFoundError:
+        print("Warning: ffmpeg not found, falling back to mp4v (lower quality)")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     if show_preview:
@@ -392,7 +410,10 @@ def render_story(
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
                 y_offset += 35
 
-        out.write(display)
+        if ffmpeg_proc:
+            ffmpeg_proc.stdin.write(display.tobytes())
+        elif out:
+            out.write(display)
 
         if show_preview:
             cv2.imshow("Story Preview", display)
@@ -405,7 +426,16 @@ def render_story(
             pct = frame_idx / total_frames * 100
             print(f"  [{pct:.1f}%] Frame {frame_idx}/{total_frames}")
 
-    out.release()
+    if ffmpeg_proc:
+        ffmpeg_proc.stdin.close()
+        stderr = ffmpeg_proc.stderr.read()
+        ffmpeg_proc.wait()
+        if ffmpeg_proc.returncode != 0:
+            print(f"Warning: ffmpeg returned {ffmpeg_proc.returncode}")
+            if stderr:
+                print(f"  {stderr.decode(errors='replace')[-300:]}")
+    elif out:
+        out.release()
     cap.release()
     if show_preview:
         cv2.destroyAllWindows()
