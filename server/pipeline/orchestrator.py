@@ -239,6 +239,35 @@ class PipelineOrchestrator:
         self._initialized = True
         logger.info(f"Pipeline ready ({(t_voice - t0)*1000:.0f}ms)")
 
+    def process_frame_sync(self, frame_bgr: np.ndarray, fw: int, fh: int) -> "PipelineResult":
+        """Synchronous frame processing for offline/batch use.
+
+        Runs the full SAM → tracking → effects → RLE pipeline on a single
+        frame without the background thread.  Safe to call in a loop.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        self._fw = fw
+        self._fh = fh
+
+        now = time.time()
+        new_segments = self._segmenter.segment_frame(frame_bgr)
+        self._sam_count += 1
+        self._person_mask = getattr(self._segmenter, 'last_person_mask', None)
+
+        self._update_tracks(new_segments, now, fh, fw)
+        tracked = self._get_tracked_output(now, fh, fw)
+        self._apply_effects(tracked)
+        self._encode_rle_all(tracked, fw, fh)
+
+        result = PipelineResult()
+        result.segments = tracked
+        result.masks_frame_id = self._frame_count
+        self._frame_count += 1
+        self._cached_result = result
+        return result
+
     def reset(self):
         self._tracks.clear()
         self._next_track_id = 0

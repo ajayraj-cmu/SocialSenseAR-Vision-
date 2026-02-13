@@ -871,6 +871,10 @@ Examples with Intensity & Brightness:
             import json
             data = json.loads(text)
 
+            # Handle Gemini returning a list of commands
+            if isinstance(data, list):
+                data = data[0] if data else {}
+
             plan = CommandPlan(
                 targets=data.get("targets", []),
                 effect_type=data.get("effect_type") or "blur",

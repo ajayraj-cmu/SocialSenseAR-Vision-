@@ -185,6 +185,8 @@ class SocialSenseGPU:
             hf_personaplex_token=os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN"),
             personaplex_enabled=personaplex_enabled,
             personaplex_url=os.getenv("PERSONAPLEX_URL", "ws://localhost:8998/api/chat"),
+            # Lower min mask area to allow small body part masks (hand, head, face)
+            rle_min_mask_area=16,
         )
 
         # Log HF token status (separate tokens for SAM3 vs PersonaPlex)
@@ -312,6 +314,7 @@ class SocialSenseGPU:
             logger.info(f"Client connected: {remote}")
 
             frame_count = 0
+            audio_count = 0
             t_start = time.time()
             last_masks_fid = -1  # track masks_frame_id changes
 
@@ -454,6 +457,9 @@ class SocialSenseGPU:
 
                     elif payload_type == "audio":
                         if self.pipeline and hasattr(self.pipeline, "process_audio"):
+                            if audio_count == 0:
+                                logger.info(f"[{remote}] First audio chunk: {msg.audio.num_samples} samples @ {msg.audio.sample_rate}Hz")
+                            audio_count += 1
                             self.pipeline.process_audio(
                                 msg.audio.pcm16_data,
                                 msg.audio.sample_rate,

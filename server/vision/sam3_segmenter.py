@@ -162,6 +162,11 @@ class SAM3Segmenter:
         self._do_rescale = True
         self._fast_preprocess_ready = False
 
+        # Aspect-ratio-preserving preprocess: valid (non-padded) region
+        self._preprocess_valid_h = 0
+        self._preprocess_valid_w = 0
+        self._preprocess_target = 0
+
         # Compiled forward for decoder (may be same as model.forward if compile fails)
         self._compiled_forward = None
 
@@ -1032,12 +1037,29 @@ class SAM3Segmenter:
         torch = self._torch
         h, w = frame_bgr.shape[:2]
 
-        # Resize to model's expected input size
-        resized = cv2.resize(frame_bgr, (self._img_target_w, self._img_target_h),
-                             interpolation=cv2.INTER_LINEAR)
+        # Resize preserving aspect ratio (longest edge = target), then pad to square.
+        # Without this, portrait frames (e.g. 1080x1920) get squashed to square,
+        # distorting spatial relationships and misplacing small-object masks.
+        target = max(self._img_target_h, self._img_target_w)
+        scale = target / max(h, w)
+        new_h = int(round(h * scale))
+        new_w = int(round(w * scale))
+        resized = cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Pad to square (model expects square input, e.g. 1008x1008)
+        if new_h == target and new_w == target:
+            padded = resized
+        else:
+            padded = np.zeros((target, target, 3), dtype=np.uint8)
+            padded[:new_h, :new_w] = resized
+
+        # Store valid region for mask cropping in post-processing
+        self._preprocess_valid_h = new_h
+        self._preprocess_valid_w = new_w
+        self._preprocess_target = target
 
         # BGR -> RGB
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
 
         # To tensor: (H, W, 3) uint8 -> (1, 3, H, W) float16
         tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0)
@@ -1058,6 +1080,15 @@ class SAM3Segmenter:
         """Fallback: use HF processor (PIL path). ~15ms."""
         from PIL import Image
         torch = self._torch
+        h, w = frame_bgr.shape[:2]
+
+        # Store valid region for mask cropping (HF processor pads internally)
+        target = max(self._img_target_h, self._img_target_w)
+        if target > 0:
+            scale = target / max(h, w)
+            self._preprocess_valid_h = int(round(h * scale))
+            self._preprocess_valid_w = int(round(w * scale))
+            self._preprocess_target = target
 
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(frame_rgb)
@@ -1066,6 +1097,25 @@ class SAM3Segmenter:
         if self._device == "cuda":
             pixel_values = pixel_values.half()
         return pixel_values
+
+    def _mask_crop_region(self, Hm, Wm):
+        """Get crop dimensions to remove padding from mask tensor.
+
+        When preprocessing pads non-square images to square, the model output
+        masks contain padding regions. This returns the valid (non-padded)
+        region size in mask-space coordinates.
+        """
+        target = self._preprocess_target
+        if target <= 0:
+            return Hm, Wm
+        valid_h = self._preprocess_valid_h
+        valid_w = self._preprocess_valid_w
+        if valid_h <= 0 or valid_w <= 0:
+            return Hm, Wm
+        # Map valid region from input space to mask space
+        crop_h = max(1, min(int(round(valid_h * Hm / target)), Hm))
+        crop_w = max(1, min(int(round(valid_w * Wm / target)), Wm))
+        return crop_h, crop_w
 
     # ------------------------------------------------------------------
     # Vision embedding cache (Tier 2)
@@ -1379,8 +1429,13 @@ class SAM3Segmenter:
             indices = [idx for idx, _ in passing]
             masks_raw = self._trt_out_mask_persistent[indices]  # (K, 1, Hm, Wm)
 
-            # Batch: threshold → resize → transfer (1 kernel + 1 D2H instead of K each)
+            # Batch: threshold → crop padding → resize → transfer
             masks_bool = (masks_raw[:, 0] > 0.0).to(torch.uint8)  # (K, Hm, Wm)
+            # Crop padding region (from aspect-ratio-preserving preprocess)
+            Hm, Wm = masks_bool.shape[1], masks_bool.shape[2]
+            crop_h, crop_w = self._mask_crop_region(Hm, Wm)
+            if crop_h < Hm or crop_w < Wm:
+                masks_bool = masks_bool[:, :crop_h, :crop_w]
             masks_resized = torch.nn.functional.interpolate(
                 masks_bool.unsqueeze(1).float(), size=(h, w), mode='nearest'
             ).squeeze(1).to(torch.uint8) * 255  # (K, h, w)
@@ -1709,6 +1764,12 @@ class SAM3Segmenter:
             # Merge all passing query masks (union)
             passing_masks = pred_masks[i, passing]  # (K, Hm, Wm)
             merged = (passing_masks > 0.0).any(dim=0).to(torch.uint8)  # (Hm, Wm)
+
+            # Crop padding region (from aspect-ratio-preserving preprocess)
+            Hm, Wm = merged.shape[0], merged.shape[1]
+            crop_h, crop_w = self._mask_crop_region(Hm, Wm)
+            if crop_h < Hm or crop_w < Wm:
+                merged = merged[:crop_h, :crop_w]
 
             # Resize to target (h, w) using nearest (fast)
             mask_resized = torch.nn.functional.interpolate(

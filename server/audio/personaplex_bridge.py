@@ -33,17 +33,17 @@ _UNITY_SAMPLE_RATE = 16000        # Quest mic sample rate
 
 
 def _resample_linear(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Resample PCM audio using linear interpolation."""
+    """Resample PCM audio using linear interpolation (preserves float32)."""
     if src_rate == dst_rate:
         return pcm
     ratio = dst_rate / src_rate
     n_out = int(len(pcm) * ratio)
-    indices = np.arange(n_out) / ratio
+    indices = np.arange(n_out, dtype=np.float32) / np.float32(ratio)
     indices = np.clip(indices, 0, len(pcm) - 1)
     idx_floor = indices.astype(np.int64)
     idx_ceil = np.minimum(idx_floor + 1, len(pcm) - 1)
-    frac = indices - idx_floor
-    return pcm[idx_floor] * (1.0 - frac) + pcm[idx_ceil] * frac
+    frac = (indices - idx_floor.astype(np.float32)).astype(np.float32)
+    return pcm[idx_floor] * (np.float32(1.0) - frac) + pcm[idx_ceil] * frac
 
 
 class PersonaPlexBridge:
@@ -87,6 +87,10 @@ class PersonaPlexBridge:
         # Opus encoder/decoder (lazy init — requires sphn)
         self._opus_writer = None
         self._opus_reader = None
+
+        # Opus frame buffering (must send exact frame sizes)
+        self._opus_frame_size = 960  # 40ms at 24kHz — standard Opus frame
+        self._pcm_buffer = np.empty(0, dtype=np.float32)
 
         # Text token accumulation
         self._text_buffer = ""
@@ -222,22 +226,28 @@ class PersonaPlexBridge:
         if self._opus_writer is None:
             self._opus_writer = sphn.OpusStreamWriter(_PERSONAPLEX_SAMPLE_RATE)
 
-        # PCM16 bytes → float32 numpy
-        samples = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        # PCM16 bytes → float32 numpy (keep float32 dtype — sphn requires it)
+        samples = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / np.float32(32768.0)
 
         # Resample to 24kHz if needed
         if sample_rate != _PERSONAPLEX_SAMPLE_RATE:
             samples = _resample_linear(samples, sample_rate, _PERSONAPLEX_SAMPLE_RATE)
 
-        # Encode to Opus
-        self._opus_writer.append_pcm(samples)
-        opus_bytes = self._opus_writer.read_bytes()
+        # Append to buffer and send complete Opus frames
+        self._pcm_buffer = np.concatenate([self._pcm_buffer, samples])
+        frame_size = self._opus_frame_size
 
-        if len(opus_bytes) > 0:
-            msg = bytes([_MSG_AUDIO]) + opus_bytes
-            # Thread-safe queue push
-            if self._loop is not None:
-                self._loop.call_soon_threadsafe(self._send_queue.put_nowait, msg)
+        while len(self._pcm_buffer) >= frame_size:
+            frame = np.ascontiguousarray(self._pcm_buffer[:frame_size], dtype=np.float32)
+            self._pcm_buffer = self._pcm_buffer[frame_size:]
+
+            self._opus_writer.append_pcm(frame)
+            opus_bytes = self._opus_writer.read_bytes()
+
+            if len(opus_bytes) > 0:
+                msg = bytes([_MSG_AUDIO]) + opus_bytes
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(self._send_queue.put_nowait, msg)
 
     def get_audio_response(self) -> Optional[bytes]:
         """Get and clear buffered audio response (PCM16 16kHz mono).
