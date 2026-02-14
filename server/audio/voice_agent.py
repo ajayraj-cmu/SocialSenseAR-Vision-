@@ -22,7 +22,7 @@ from typing import Optional
 from dataclasses import dataclass
 import numpy as np
 
-from server.config import EFFECT_TYPES
+from server.config import EFFECT_TYPES, CUSTOM_EFFECT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -224,22 +224,23 @@ class VoiceCommandPlanner:
 
     # --- Fast-path regex patterns (built from EFFECT_TYPES + custom types) ---
     _EFFECTS = '|'.join(EFFECT_TYPES)  # "blur|dim|pixelate|highlight|outline|color"
-    _CUSTOM_EFFECTS = "frosted_glass|frosted glass|redact|grayscale|spotlight|desaturate|noise|soft_glow|warm_tint|cool_tint"
+    # Build from CUSTOM_EFFECT_TYPES (config.py) + human-friendly aliases
+    _CUSTOM_EFFECTS = '|'.join(CUSTOM_EFFECT_TYPES) + '|frosted glass|black and white'
     _ALL_EFFECTS = _EFFECTS + '|' + _CUSTOM_EFFECTS
     # Gerund/variant forms for "stop blurring", "remove dimming", etc.
     _EFFECTS_GERUND = (
         r'blur(?:ring)?|pixelat(?:e|ing)|dim(?:ming)?|highlight(?:ing)?|outlin(?:e|ing)|color(?:ing)?'
     )
-    _FILLER = {'the', 'a', 'an', 'my', 'that', 'this'}
+    _FILLER = {'the', 'a', 'an', 'my', 'that', 'this', 'on', 'to', 'for'}
     _SELF_WORDS = {'me', 'myself', 'us'}
     _NOT_TARGETS = {'everything', 'every', 'all', 'anything'}  # incomplete phrases, not real objects
 
     _RE_CLEAR = re.compile(r'^(?:clear|reset|stop|off)$', re.IGNORECASE)
     _RE_EFFECT_INVERT = re.compile(
-        rf'^({_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except|nothing\s+but)\s+(.+)$', re.IGNORECASE,
+        rf'^({_ALL_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except|nothing\s+but)\s+(.+)$', re.IGNORECASE,
     )
     _RE_EFFECT_TARGET = re.compile(
-        rf'^({_EFFECTS})\s+(.+)$', re.IGNORECASE,
+        rf'^(?:apply\s+)?({_ALL_EFFECTS})\s+(?:on\s+|to\s+)?(.+)$', re.IGNORECASE,
     )
     _RE_REMOVE = re.compile(
         rf'^(?:stop|remove)\s+({_EFFECTS_GERUND})\s*(?:from\s+)?(.+)$', re.IGNORECASE,
@@ -500,10 +501,13 @@ class VoiceCommandPlanner:
             target = self._extract_target(m.group(2))
             if target is None:
                 return None
+            effect = m.group(1).lower().replace(' ', '_')
+            if effect == "black_and_white":
+                effect = "grayscale"
             return CommandPlan(
-                targets=[target], effect_type=m.group(1).lower(),
+                targets=[target], effect_type=effect,
                 intensity=0.9, action="add", invert=True,  # Increased from 0.8
-                reasoning=f"fast-path: {m.group(1)} everything but {target}",
+                reasoning=f"fast-path: {effect} everything but {target}",
             )
 
         # Pattern 4: "stop/remove <effect> <target>" or "un<effect> <target>"
@@ -518,24 +522,36 @@ class VoiceCommandPlanner:
                 reasoning=f"fast-path: remove {m.group(1)} from {target}",
             )
 
-        # Pattern 2: "<effect> <target>"
+        # Pattern 2: "<effect> <target>" (handles ALL effect types)
         m = self._RE_EFFECT_TARGET.match(text)
         if m:
             target = self._extract_target(m.group(2))
             if target is None:
                 return None
+            effect = m.group(1).lower().replace(' ', '_')
+            if effect == "black_and_white":
+                effect = "grayscale"
+            if effect == "spotlight":
+                return CommandPlan(
+                    targets=[target], effect_type="dim",
+                    intensity=0.8, action="add", invert=True,
+                    reasoning=f"fast-path: spotlight on {target} (inverted dim)",
+                )
             return CommandPlan(
-                targets=[target], effect_type=m.group(1).lower(),
+                targets=[target], effect_type=effect,
                 intensity=0.9, action="add",  # Increased from 0.8
-                reasoning=f"fast-path: {m.group(1)} {target}",
+                reasoning=f"fast-path: {effect} {target}",
             )
 
         # Pattern 5: Custom effect types (frosted glass, redact, spotlight, etc.)
+        # Matches: "<custom_effect> [on|to] <target>"
         custom_match = re.match(
             rf'^(?:apply\s+)?({self._CUSTOM_EFFECTS})\s+(?:on\s+|to\s+)?(.+)$', text, re.IGNORECASE,
         )
         if custom_match:
             effect = custom_match.group(1).lower().replace(' ', '_')
+            if effect == "black_and_white":
+                effect = "grayscale"
             target = self._extract_target(custom_match.group(2))
             if target is not None:
                 # "spotlight" is semantically "dim everything except target"
@@ -549,6 +565,30 @@ class VoiceCommandPlanner:
                     targets=[target], effect_type=effect,
                     intensity=0.9, action="add",
                     reasoning=f"fast-path: {effect} on {target}",
+                )
+
+        # Pattern 5b: "make <target> <effect>" (e.g. "make person grayscale", "make laptop blurry")
+        make_match = re.match(
+            rf'^(?:make|turn|set)\s+(.+?)\s+({self._ALL_EFFECTS}|blurry|blurred)$', text, re.IGNORECASE,
+        )
+        if make_match:
+            target = self._extract_target(make_match.group(1))
+            effect = make_match.group(2).lower().replace(' ', '_')
+            if effect in ("blurry", "blurred"):
+                effect = "blur"
+            if effect == "black_and_white":
+                effect = "grayscale"
+            if target is not None:
+                if effect == "spotlight":
+                    return CommandPlan(
+                        targets=[target], effect_type="dim",
+                        intensity=0.8, action="add", invert=True,
+                        reasoning=f"fast-path: make {target} spotlight (inverted dim)",
+                    )
+                return CommandPlan(
+                    targets=[target], effect_type=effect,
+                    intensity=0.9, action="add",
+                    reasoning=f"fast-path: make {target} {effect}",
                 )
 
         # Pattern 6: Environmental requests with full-screen filters
@@ -737,8 +777,7 @@ User said: "{utterance}"
 Full Pipeline Context:
 - Known objects in scene (SAM3 has detected these): {known_str}
 - Currently active effects: {active_str}
-- Available effect types: blur, dim, pixelate, highlight, outline, color
-- Available custom masks: frosted_glass, redact, grayscale, spotlight, desaturate, noise
+- Available effect types: {', '.join(EFFECT_TYPES + CUSTOM_EFFECT_TYPES)}
 - Available full-screen filters: dim, warm, cool, night, grayscale, color
 - Pipeline supports: inverted effects (apply to everything EXCEPT target), color overlays with hex colors
 - Previous user command: "{last_command}"
@@ -746,7 +785,7 @@ Full Pipeline Context:
 
 Output JSON with these fields:
 - "targets": list of object labels. ALWAYS include any object the user names, even if not in the known set. SAM3 will search for it.
-- "effect_type": {' | '.join(f'"{e}"' for e in EFFECT_TYPES)}
+- "effect_type": {' | '.join(f'"{e}"' for e in EFFECT_TYPES + CUSTOM_EFFECT_TYPES)}
 - "color_hex": hex color string (e.g., "#FF0000") if effect_type is "color" or user requests a specific color. IMPORTANT: Adjust brightness based on modifiers (see brightness rules below).
 - "intensity": 0.0-1.0 representing effect strength. Extract from intensity modifiers in the command (see intensity rules below). Default: 0.8 for normal effects, 0.5 for full-screen filters.
 - "action": "add" | "remove" | "change"
@@ -838,6 +877,14 @@ Examples with Intensity & Brightness:
 - "frosted glass on screen" → targets: ["screen"], effect_type: "frosted_glass", intensity: 0.9
 - "redact laptop" → targets: ["laptop"], effect_type: "redact", intensity: 1.0
 - "spotlight on me" → targets: ["person"], effect_type: "dim", intensity: 0.8, invert: true
+- "make person grayscale" → targets: ["person"], effect_type: "grayscale", intensity: 0.9
+- "make laptop black and white" → targets: ["laptop"], effect_type: "grayscale", intensity: 0.9
+- "desaturate the background" → targets: ["person"], effect_type: "desaturate", intensity: 0.9, invert: true
+- "add noise to person" → targets: ["person"], effect_type: "noise", intensity: 0.9
+- "make the wall warm" → targets: ["wall"], effect_type: "warm_tint", intensity: 0.9
+- "cool tint on screen" → targets: ["screen"], effect_type: "cool_tint", intensity: 0.9
+- "soft glow on person" → targets: ["person"], effect_type: "soft_glow", intensity: 0.9
+- "reduce contrast on laptop" → targets: ["laptop"], effect_type: "reduce_contrast", intensity: 0.9
 - Base color hex: "blue" → "#0000FF", "red" → "#FF0000", "green" → "#00FF00", "yellow" → "#FFFF00", "orange" → "#FFA500", "purple" → "#800080", "pink" → "#FFC0CB", "black" → "#000000", "white" → "#FFFFFF", etc.
 - If user says "highlight X" without color, use effect_type: "highlight" (warm yellow)
 - If user says "highlight X [color]", use effect_type: "color" with that color
