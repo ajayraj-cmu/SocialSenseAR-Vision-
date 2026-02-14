@@ -823,9 +823,15 @@ def main():
             targets = cmd.get("targets", [])
 
             if action == "remove":
-                # "clear" — don't clear prompts on server, just let
-                # the renderer handle effect removal via effects_timeline
-                print(f"  @frame {cmd_frame}: clear effects (renderer-only)")
+                # Send "clear" to server so SAM prompts are wiped —
+                # otherwise old prompts accumulate and interfere with
+                # subsequent commands (e.g. "person" still active when
+                # "hand" is added, causing fragmented masks).
+                command_schedule.append({
+                    "frame_idx": cmd_frame,
+                    "command_text": "clear",
+                })
+                print(f"  @frame {cmd_frame}: clear prompts + effects")
                 continue
 
             # Add each target as a SAM3 prompt
