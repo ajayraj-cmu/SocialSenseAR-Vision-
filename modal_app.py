@@ -204,19 +204,7 @@ class SocialSenseGPU:
             os.environ["HF_TOKEN"] = hf_sam
             logger.info("Set HF_TOKEN from HF_SAM_TOKEN for SAM3 model loading")
 
-        logger.info("Loading SAM3 model (this takes ~60-90s on cold start)...")
-        self.pipeline = PipelineOrchestrator(self.server_config)
-
-        # Initialize pipeline now so model loads at startup. If HF_SAM_TOKEN is missing
-        # or facebook/sam3 access is not granted, this will fail and the container
-        # won't become ready (check Modal logs).
-        try:
-            self.pipeline.initialize()
-        except Exception as e:
-            logger.error("Pipeline initialization failed (check HF_SAM_TOKEN / HF_TOKEN in Modal secret and facebook/sam3 access): %s", e, exc_info=True)
-            raise
-
-        # PersonaPlex (Moshi): start in-process server when enabled (same container as SAM3)
+        # PersonaPlex (Moshi): start BEFORE pipeline init so it's ready when bridge connects
         if personaplex_enabled:
             import subprocess
             import socket
@@ -242,23 +230,39 @@ class SocialSenseGPU:
                     cwd="/root",
                     env=os.environ.copy(),
                 )
-                # Wait for server to accept connections (up to 180s for model load)
-                for attempt in range(180):
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.settimeout(2)
-                        sock.connect(("127.0.0.1", 8998))
-                        sock.close()
-                        logger.info("PersonaPlex (Moshi) server ready on ws://localhost:8998/api/chat")
-                        break
-                    except (socket.error, OSError):
-                        time.sleep(1)
-                        if attempt % 30 == 29:
-                            logger.info("Waiting for PersonaPlex server... (%ds)", attempt + 1)
-                else:
-                    logger.warning("PersonaPlex server did not become ready in 180s; voice may fail until it is up")
+                # Don't block here — Moshi loads in parallel with SAM3 below.
+                # The bridge will connect once Moshi is accepting connections.
             else:
                 logger.warning("Moshi path /root/moshi not found; PersonaPlex disabled")
+
+        logger.info("Loading SAM3 model (this takes ~60-90s on cold start)...")
+        self.pipeline = PipelineOrchestrator(self.server_config)
+
+        # Initialize pipeline now so model loads at startup. If HF_SAM_TOKEN is missing
+        # or facebook/sam3 access is not granted, this will fail and the container
+        # won't become ready (check Modal logs).
+        try:
+            self.pipeline.initialize()
+        except Exception as e:
+            logger.error("Pipeline initialization failed (check HF_SAM_TOKEN / HF_TOKEN in Modal secret and facebook/sam3 access): %s", e, exc_info=True)
+            raise
+
+        # Wait for Moshi to accept connections if it was started above
+        if personaplex_enabled and moshi_path.exists():
+            for attempt in range(180):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    sock.connect(("127.0.0.1", 8998))
+                    sock.close()
+                    logger.info("PersonaPlex (Moshi) server ready on ws://localhost:8998/api/chat")
+                    break
+                except (socket.error, OSError):
+                    time.sleep(1)
+                    if attempt % 30 == 29:
+                        logger.info("Waiting for PersonaPlex server... (%ds)", attempt + 1)
+            else:
+                logger.warning("PersonaPlex server did not become ready in 180s; voice may fail until it is up")
 
         # Persist downloaded models so next cold start is faster
         cache_volume.commit()

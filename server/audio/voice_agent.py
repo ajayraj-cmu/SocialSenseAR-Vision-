@@ -875,6 +875,8 @@ Examples with Intensity & Brightness:
 - "less saturated" → full_screen_filter: "grayscale", full_screen_intensity: 0.7, targets: []
 - "make everything blue" → full_screen_filter: "color", full_screen_color: "#0000FF", full_screen_intensity: 0.6, targets: []
 - "frosted glass on screen" → targets: ["screen"], effect_type: "frosted_glass", intensity: 0.9
+- "make my hand a transparent pink" → targets: ["hand"], effect_type: "color", color_hex: "#FFC0CB", intensity: 0.4 (transparent = low intensity, NOT frosted_glass)
+- "transparent blue overlay on laptop" → targets: ["laptop"], effect_type: "color", color_hex: "#0000FF", intensity: 0.3
 - "redact laptop" → targets: ["laptop"], effect_type: "redact", intensity: 1.0
 - "spotlight on me" → targets: ["person"], effect_type: "dim", intensity: 0.8, invert: true
 - "make person grayscale" → targets: ["person"], effect_type: "grayscale", intensity: 0.9
@@ -885,10 +887,16 @@ Examples with Intensity & Brightness:
 - "cool tint on screen" → targets: ["screen"], effect_type: "cool_tint", intensity: 0.9
 - "soft glow on person" → targets: ["person"], effect_type: "soft_glow", intensity: 0.9
 - "reduce contrast on laptop" → targets: ["laptop"], effect_type: "reduce_contrast", intensity: 0.9
+- "blur the posters on my wall" → targets: ["posters"], effect_type: "blur", intensity: 0.9 (NOT ["posters", "wall"] — "on my wall" is a location qualifier)
+- "blur the books on the shelf" → targets: ["books"], effect_type: "blur", intensity: 0.9 (NOT ["books", "shelf"])
+- "dim the light on the ceiling" → targets: ["light"], effect_type: "dim", intensity: 0.9 (NOT ["light", "ceiling"])
 - Base color hex: "blue" → "#0000FF", "red" → "#FF0000", "green" → "#00FF00", "yellow" → "#FFFF00", "orange" → "#FFA500", "purple" → "#800080", "pink" → "#FFC0CB", "black" → "#000000", "white" → "#FFFFFF", etc.
 - If user says "highlight X" without color, use effect_type: "highlight" (warm yellow)
 - If user says "highlight X [color]", use effect_type: "color" with that color
+- "transparent [color]", "see-through [color]", or "[color] tint" → use effect_type: "color" with that color and LOW intensity (0.3-0.5) for transparency. Do NOT use frosted_glass — frosted_glass is a hardcoded white/blue blur with NO color support.
+- frosted_glass = white/blue blur overlay only. NEVER use frosted_glass for colored transparency requests.
 - NEVER return empty targets if the user names an object
+- When a user says "X on my Y" or "X on the Y" (e.g. "blur the posters on my wall"), "on my Y" is a LOCATION QUALIFIER — the target is ONLY "X" (e.g. ["posters"]), NOT ["posters", "wall"]. Only include Y as a separate target if the user explicitly says "X and Y" or lists them separately.
 - If just an object name with no action ("person"), default to outline effect
 
 {{

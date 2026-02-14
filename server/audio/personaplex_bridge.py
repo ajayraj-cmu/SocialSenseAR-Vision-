@@ -233,12 +233,19 @@ class PersonaPlexBridge:
                 logger.error(f"PersonaPlex send error: {e}")
                 break
 
+    _audio_drop_count = 0
+
     def send_audio(self, pcm16_bytes: bytes, sample_rate: int):
         """Send PCM16 audio to PersonaPlex (thread-safe).
 
         Encodes PCM16 → float32 → resample to 24kHz → Opus → send.
         """
         if not self._ready:
+            self._audio_drop_count += 1
+            if self._audio_drop_count == 1:
+                logger.warning("PersonaPlex bridge not ready — dropping audio (will log every 500)")
+            elif self._audio_drop_count % 500 == 0:
+                logger.warning(f"PersonaPlex bridge not ready — {self._audio_drop_count} audio chunks dropped")
             return
 
         import sphn
