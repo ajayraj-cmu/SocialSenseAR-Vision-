@@ -211,8 +211,6 @@ class SocialSenseGPU:
             from pathlib import Path
 
             hf_pp = os.getenv("HF_PERSONAPLEX_TOKEN") or os.getenv("HF_TOKEN")
-            if hf_pp:
-                os.environ["HF_TOKEN"] = hf_pp  # moshi subprocess uses this for nvidia/personaplex-7b-v1
             moshi_path = Path("/root/moshi")
             if moshi_path.exists():
                 logger.info("Installing moshi (PersonaPlex) for in-process server...")
@@ -225,10 +223,15 @@ class SocialSenseGPU:
                 if result.returncode != 0:
                     logger.warning("Moshi pip install stderr: %s", result.stderr)
                 logger.info("Starting PersonaPlex (Moshi) server on port 8998...")
+                # Pass PersonaPlex token to subprocess without overwriting global HF_TOKEN
+                # (SAM3 needs HF_SAM_TOKEN, not the PersonaPlex token)
+                moshi_env = os.environ.copy()
+                if hf_pp:
+                    moshi_env["HF_TOKEN"] = hf_pp
                 subprocess.Popen(
                     [sys.executable, "-m", "moshi.server", "--host", "0.0.0.0", "--port", "8998"],
                     cwd="/root",
-                    env=os.environ.copy(),
+                    env=moshi_env,
                 )
                 # Don't block here — Moshi loads in parallel with SAM3 below.
                 # The bridge will connect once Moshi is accepting connections.
