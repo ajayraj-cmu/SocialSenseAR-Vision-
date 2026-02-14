@@ -46,7 +46,7 @@ class ServerConfig:
     track_match_max_dist: float = 0.20   # max centroid distance (fraction of frame diagonal)
     track_match_skip_dist: float = 0.25  # skip obviously impossible matches above this
     gemini_label_match_cost: float = 0.20  # max cost for Gemini label→track matching
-    rle_scale: float = 0.75             # RLE encoding downscale factor (0.75 = 3/4 resolution)
+    rle_scale: float = 1.0              # RLE encoding scale (1.0 = full resolution, no downscale)
 
     # RLE mask smoothing (optional quality tuning — see docs/BORDER_SMOOTHNESS_AND_LATENCY_SUGGESTIONS.md)
     rle_edge_blur_kernel: int = 7       # Gaussian blur kernel size before threshold (5, 7, or 9; higher = softer edges). Raised from 5 to 7 for smoother borders.
