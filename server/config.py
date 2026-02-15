@@ -11,6 +11,7 @@ CUSTOM_EFFECT_TYPES = (
     "frosted_glass", "redact", "grayscale", "spotlight",
     "noise", "desaturate", "vignette", "soft_glow",
     "reduce_contrast", "warm_tint", "cool_tint",
+    "logo",  # Custom image overlay — LogoTexture.png in Resources
 )
 
 
