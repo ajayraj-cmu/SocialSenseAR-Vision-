@@ -24,8 +24,7 @@ from pathlib import Path
 
 UNITY_SRC = (
     Path(__file__).parent.parent
-    / "unitySetUp"
-    / "SocialSenseAR-Unity"
+    / "unity-client"
 )
 
 # The single line in SocialSenseClient.cs that holds the server URL

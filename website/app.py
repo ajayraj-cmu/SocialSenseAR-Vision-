@@ -258,14 +258,24 @@ def run_deploy(state: dict):
                 f.write(f"{k}={v}\n")
         log(f"Wrote {len(state.get('env_vars', {}))} env vars.")
 
-        # Copy backend packages
-        server_backend = Path(__file__).parent.parent / "ServerBackend"
-        src_pkg = server_backend / "server"
+        # Copy backend packages: prefer ServerBackend/, fall back to SocialSenseAR root
+        socialsense_root = Path(__file__).resolve().parent.parent
+        modal_config_src = socialsense_root / "ServerBackend" / "modal_config.py"
+        if not modal_config_src.exists():
+            modal_config_src = socialsense_root / "modal_config.py"
+        if not modal_config_src.exists():
+            raise FileNotFoundError(
+                f"modal_config.py not found. Looked in "
+                f"{socialsense_root / 'ServerBackend'} and {socialsense_root}."
+            )
+        server_pkg_src = socialsense_root / "ServerBackend" / "server"
+        if not server_pkg_src.exists():
+            server_pkg_src = socialsense_root / "server"
         dst_pkg = repo_dir / "server"
-        if src_pkg.exists() and not dst_pkg.exists():
-            shutil.copytree(src_pkg, dst_pkg)
+        if server_pkg_src.exists() and not dst_pkg.exists():
+            shutil.copytree(server_pkg_src, dst_pkg)
             log("Copied server/ package.")
-        shutil.copy2(server_backend / "modal_config.py", repo_dir / "modal_config.py")
+        shutil.copy2(modal_config_src, repo_dir / "modal_config.py")
         shutil.copy2(Path(__file__).parent / "modal_deploy_wrapper.py",
                      repo_dir / "modal_deploy_wrapper.py")
         log("Copied Modal wrapper + config.")
@@ -328,4 +338,4 @@ def _extract_endpoint(output: str) -> str:
 if __name__ == "__main__":
     # debug=False prevents the Werkzeug reloader from restarting the process
     # mid-deploy and killing background deploy threads.
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="0.0.0.0", port=5002, debug=False)
