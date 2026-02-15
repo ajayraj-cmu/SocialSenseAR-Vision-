@@ -72,6 +72,12 @@ class ServerConfig:
     )
 
     # Gemini Vision
+    # Toggle vision-based scene understanding on/off.
+    # When False, voice commands skip the Gemini Vision API call (Phase 1) and
+    # fall back to the fast regex parser + text-only Gemini planner instead.
+    # This eliminates the ~1-3s latency added by the vision snapshot call.
+    gemini_vision_enabled: bool = False
+
     gemini_model: str = "gemini-2.5-flash"
     gemini_planning_model: str = "gemini-2.5-flash-lite"  # Fast model for voice command parsing
     gemini_min_interval: float = 6.0    # seconds between scene understanding API calls
