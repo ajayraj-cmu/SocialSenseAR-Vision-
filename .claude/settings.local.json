@@ -20,7 +20,10 @@
       "Bash(python3:*)",
       "Bash(cat:*)",
       "Bash(find:*)",
-      "Bash(git -C /Users/jaywankhede/Downloads/Meta_SocialSenseAR/SocialSenseAR log --oneline -20)"
+      "Bash(git -C /Users/jaywankhede/Downloads/Meta_SocialSenseAR/SocialSenseAR log --oneline -20)",
+      "Bash(lsof:*)",
+      "Bash(kill:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

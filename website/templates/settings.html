@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title_suffix %} — Settings{% endblock %}
+
+{% block extra_css %}
+  .settings-section {
+    margin-bottom: 32px;
+  }
+  .settings-section h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .settings-section > p {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+
+  .repo-row {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  @media(max-width: 540px) {
+    .repo-row { flex-direction: column; }
+    .repo-row > div { width: 100% !important; }
+  }
+
+  .section-divider {
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+
+  .danger-card {
+    border-color: #4b1111;
+  }
+  .danger-card:hover { border-color: #5a1515; }
+  .danger-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .danger-info h4 { font-size: 14px; font-weight: 500; color: #f87171; }
+  .danger-info p { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+
+  .saved-badge {
+    display: inline-block;
+    background: var(--success-bg);
+    border: 1px solid #134e35;
+    border-radius: 20px;
+    padding: 2px 9px;
+    font-size: 11px;
+    color: var(--success);
+    margin-left: 8px;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .saved-badge.show { opacity: 1; }
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>Settings</h2>
+  <p>Configure your repository, environment variables, and deployment credentials.</p>
+</div>
+
+<!-- Git Repository -->
+<div class="settings-section">
+  <h3>Git Repository</h3>
+  <p>Point to a public or private GitHub repo containing your computer vision model.</p>
+
+  <div class="card">
+    <div class="repo-row">
+      <div class="field" style="flex: 1;">
+        <label>GitHub Repo URL</label>
+        <input type="text" id="repoUrl"
+               placeholder="https://github.com/yourname/your-cv-model"
+               value="{{ state.github_repo_url }}">
+      </div>
+      <div class="field" style="width: 180px;">
+        <label>Branch / Tag <span class="optional-tag">optional</span></label>
+        <input type="text" id="githubRef"
+               placeholder="main"
+               value="{{ state.github_ref }}">
+      </div>
+    </div>
+    <div class="hint" style="margin-top: -8px; margin-bottom: 16px;" id="urlHint">
+      Public or private HTTPS URL. Leave Branch blank for the default branch.
+    </div>
+
+    <div class="field">
+      <label>GitHub Personal Access Token <span class="optional-tag">required for private repos</span></label>
+      <input type="password" id="githubPat"
+             placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+             value="{{ state.github_pat }}">
+      <div class="hint">
+        Needs <strong style="color: var(--text-secondary);">repo</strong> scope (read-only is fine).
+        Generate one at
+        <a href="https://github.com/settings/tokens/new?scopes=repo&description=XRBridge"
+           target="_blank" rel="noopener">github.com/settings/tokens</a>.
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveRepo()">Save</button>
+    <span class="save-confirm" id="confirmRepo">Saved</span>
+  </div>
+</div>
+
+<!-- Environment Variables -->
+<div class="settings-section">
+  <h3>Environment Variables</h3>
+  <p>API keys and secrets injected into the deployment environment.</p>
+
+  <div class="card">
+    <div class="field">
+      <label>Variables</label>
+      <textarea id="envVars"
+                placeholder="OPENAI_API_KEY=sk-...&#10;GEMINI_API_KEY=AIza...&#10;HF_SAM_TOKEN=hf_...&#10;HF_TOKEN=hf_...&#10;MY_CUSTOM_VAR=value">{{ env_text }}</textarea>
+      <div class="hint">
+        One per line &mdash; <code style="color: var(--text-secondary);">KEY=VALUE</code>.
+        Required for SAM3: <code style="color: var(--text-secondary);">OPENAI_API_KEY</code>,
+        <code style="color: var(--text-secondary);">GEMINI_API_KEY</code>,
+        <code style="color: var(--text-secondary);">HF_SAM_TOKEN</code>.
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveRepo()">Save</button>
+    <span class="save-confirm" id="confirmEnv">Saved</span>
+  </div>
+</div>
+
+<div class="section-divider"></div>
+
+<!-- Modal Credentials -->
+<div class="settings-section">
+  <h3>Modal Credentials</h3>
+  <p>
+    Your Modal tokens authenticate GPU deployments. Get them at
+    <a href="https://modal.com/settings" target="_blank" rel="noopener" style="color: var(--accent);">modal.com/settings</a>
+    &rarr; API Tokens &rarr; New Token.
+  </p>
+
+  <div class="card">
+    <div class="grid-2">
+      <div class="field">
+        <label>Token ID</label>
+        <input type="text" id="tokenId"
+               placeholder="ak-xxxxxxxxxxxxxxxxxxxx"
+               value="{{ state.modal_token_id }}">
+      </div>
+      <div class="field">
+        <label>Token Secret</label>
+        <input type="password" id="tokenSecret"
+               placeholder="as-xxxxxxxxxxxxxxxxxxxx"
+               value="{{ state.modal_token_secret }}">
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveAuth()">Save</button>
+    <span class="save-confirm" id="confirmAuth">Saved</span>
+  </div>
+</div>
+
+<div class="section-divider"></div>
+
+<!-- Danger Zone -->
+<div class="settings-section">
+  <h3 style="color: #f87171;">Danger Zone</h3>
+  <div class="card danger-card">
+    <div class="danger-header">
+      <div class="danger-info">
+        <h4>Reset Deployment</h4>
+        <p>Clears the current deployment status, logs, and endpoint. Does not affect saved credentials.</p>
+      </div>
+      <button class="btn btn-danger" onclick="resetDeploy()">Reset</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+  // GitHub URL parser (mirrors server-side _parse_github_url)
+  function parseGithubUrl(raw) {
+    const url = raw.trim().replace(/\/$/, '');
+    const m = url.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+?)(?:\.git)?\/(tree|blob)\/([^/]+)/i);
+    if (m) return { repoUrl: m[1], ref: m[3] };
+    return { repoUrl: url.replace(/\.git$/i, ''), ref: null };
+  }
+
+  document.getElementById('repoUrl').addEventListener('input', function() {
+    const raw = this.value;
+    const hint = document.getElementById('urlHint');
+    const refField = document.getElementById('githubRef');
+    const parsed = parseGithubUrl(raw);
+    if (parsed.ref) {
+      if (!refField.value.trim()) refField.value = parsed.ref;
+      this.value = parsed.repoUrl;
+      hint.innerHTML = '<span style="color: var(--success);">Parsed &mdash; Clone URL: <code style="color: var(--text-secondary);">' + escHtml(parsed.repoUrl) + '</code>, Branch: <code style="color: var(--text-secondary);">' + escHtml(parsed.ref) + '</code></span>';
+    } else {
+      hint.textContent = 'Public or private HTTPS URL. Leave Branch blank for the default branch.';
+    }
+  });
+
+  async function saveRepo() {
+    const url = document.getElementById('repoUrl').value.trim();
+    const ref = document.getElementById('githubRef').value.trim();
+    const pat = document.getElementById('githubPat').value.trim();
+    const env = document.getElementById('envVars').value;
+    if (!url) { alert('Please enter a GitHub repo URL.'); return; }
+    await fetch('/api/save_repo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ github_repo_url: url, github_ref: ref, github_pat: pat, env_vars: env }),
+    });
+    flashConfirm('confirmRepo');
+    flashConfirm('confirmEnv');
+  }
+
+  async function saveAuth() {
+    const id = document.getElementById('tokenId').value.trim();
+    const sec = document.getElementById('tokenSecret').value.trim();
+    if (!id || !sec) { alert('Please enter both Token ID and Token Secret.'); return; }
+    await fetch('/api/save_auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modal_token_id: id, modal_token_secret: sec }),
+    });
+    flashConfirm('confirmAuth');
+  }
+
+  async function resetDeploy() {
+    if (!confirm('Reset deployment state? This clears the current status, logs, and endpoint.')) return;
+    await fetch('/api/reset', { method: 'POST' });
+    location.reload();
+  }
+{% endblock %}

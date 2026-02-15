@@ -1,0 +1,420 @@
+{% extends "base.html" %}
+
+{% block title_suffix %} — Deployments{% endblock %}
+
+{% block extra_css %}
+  .deploy-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .deploy-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .deploy-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .deploy-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .deploy-meta-item svg {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+  }
+  .deploy-meta-item code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  .log-section {
+    margin-top: 20px;
+  }
+  .log-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    margin-bottom: 8px;
+    border: none;
+    background: none;
+    font-family: var(--font);
+    padding: 0;
+  }
+  .log-toggle:hover { color: var(--text); }
+  .log-toggle svg {
+    width: 12px; height: 12px;
+    transition: transform 0.2s;
+  }
+  .log-toggle.open svg { transform: rotate(90deg); }
+
+  .download-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .download-info h4 { font-size: 14px; font-weight: 500; }
+  .download-info p { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+
+  /* History */
+  .history-section {
+    margin-top: 32px;
+  }
+  .history-section h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .history-entry {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .history-entry:hover { border-color: var(--border-hover); }
+  .history-summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    list-style: none;
+    background: var(--surface);
+  }
+  .history-summary::-webkit-details-marker { display: none; }
+  .history-summary::marker { display: none; content: ''; }
+  .history-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .history-dot.done { background: var(--success); }
+  .history-dot.error { background: var(--danger); }
+  .history-dot.deploying { background: var(--accent); }
+  .history-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 100px;
+  }
+  .history-repo { color: var(--text); flex: 1; }
+  .history-ref {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .history-duration {
+    color: var(--muted);
+    font-size: 12px;
+    min-width: 60px;
+    text-align: right;
+  }
+  .history-time {
+    color: var(--muted);
+    font-size: 12px;
+    min-width: 80px;
+    text-align: right;
+  }
+  .history-chevron {
+    color: var(--muted);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+  }
+  details[open] .history-chevron { transform: rotate(90deg); }
+  .history-log {
+    padding: 0 16px 16px;
+    background: var(--surface);
+  }
+  .history-log .terminal {
+    margin-top: 0;
+    max-height: 200px;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--muted);
+  }
+  .empty-state svg {
+    width: 40px; height: 40px;
+    margin-bottom: 12px;
+    opacity: 0.4;
+  }
+  .empty-state p { font-size: 14px; }
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h2>Deployments</h2>
+  <p>Deploy your AR model to Modal GPU and manage deployment history.</p>
+</div>
+
+<!-- Current Deployment -->
+<div class="card">
+  <div class="deploy-header">
+    <div>
+      <div class="card-title" style="margin-bottom: 0;">Current Deployment</div>
+    </div>
+    <div class="deploy-actions">
+      <span class="badge badge-{{ state.deploy_status }}" id="statusBadge">
+        <span class="badge-dot {% if state.deploy_status == 'deploying' %}pulse{% endif %}" id="statusDot"></span>
+        <span id="statusText">{{ state.deploy_status }}</span>
+      </span>
+      <button class="btn btn-primary" id="deployBtn" onclick="startDeploy()"
+              {% if state.deploy_status == 'deploying' %}disabled{% endif %}>
+        <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        {% if state.deploy_status == 'done' or state.deploy_status == 'error' %}Redeploy{% else %}Deploy{% endif %}
+      </button>
+      <button class="btn btn-ghost {{ 'hidden' if state.deploy_status == 'idle' }}" id="resetBtn"
+              onclick="resetDeploy()" style="font-size: 12px;">Reset</button>
+    </div>
+  </div>
+
+  {% if state.github_repo_url %}
+  <div class="deploy-meta">
+    <div class="deploy-meta-item">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
+      <code>{{ state.github_repo_url.split('/')[-1] }}</code>
+    </div>
+    {% if state.github_ref %}
+    <div class="deploy-meta-item">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6z"/><path d="M18 9a9 9 0 01-9 9"/></svg>
+      <code>{{ state.github_ref }}</code>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="inline-error hidden" id="deployError" style="margin-top: 16px;"></div>
+
+  <!-- Endpoint -->
+  <div class="{% if not state.ws_endpoint %}hidden{% endif %}" id="endpointSection" style="margin-top: 16px;">
+    <div class="endpoint-box">
+      <span class="endpoint-label">WS</span>
+      <span class="endpoint-url" id="endpointUrl">{{ state.ws_endpoint }}</span>
+      <button class="copy-btn" onclick="copyToClipboard(document.getElementById('endpointUrl').textContent, this)">Copy</button>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="log-section" id="logSection">
+    <button class="log-toggle {% if state.deploy_status == 'deploying' %}open{% endif %}" id="logToggle" onclick="toggleLog()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      Build Logs
+    </button>
+    <div class="terminal {% if state.deploy_status != 'deploying' and not state.deploy_log %}hidden{% endif %}" id="deployLog">{{ state.deploy_log | default('') }}</div>
+  </div>
+
+  <!-- Download -->
+  <div class="download-section {% if not state.unity_ready %}hidden{% endif %}" id="downloadSection">
+    <div class="download-info">
+      <h4>Unity Client Ready</h4>
+      <p>Pre-configured with your deployed WebSocket endpoint</p>
+    </div>
+    <a href="/download_unity">
+      <button class="btn btn-success">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        Download .zip
+      </button>
+    </a>
+  </div>
+</div>
+
+<!-- Deployment History -->
+<div class="history-section">
+  <h3>History</h3>
+
+  {% set history = state.get('deployment_history', []) | reverse | list %}
+  {% if history %}
+    {% for entry in history %}
+    <details class="history-entry">
+      <summary class="history-summary">
+        <span class="history-dot {{ entry.status }}"></span>
+        <span class="history-id">{{ entry.id }}</span>
+        <span class="history-repo">
+          {{ entry.repo_url.split('/')[-1] if entry.repo_url else 'unknown' }}
+        </span>
+        <span class="history-ref">{{ entry.ref if entry.ref else '' }}</span>
+        <span class="history-duration" data-start="{{ entry.started_at }}" data-end="{{ entry.finished_at }}"></span>
+        <span class="history-time" data-time="{{ entry.started_at }}">{{ entry.started_at[:10] if entry.started_at else '' }}</span>
+        <span class="history-chevron">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+        </span>
+      </summary>
+      <div class="history-log">
+        <div class="terminal">{{ entry.log | default('No logs available.') }}</div>
+        {% if entry.ws_endpoint %}
+        <div class="endpoint-box" style="margin-top: 12px;">
+          <span class="endpoint-label">WS</span>
+          <span class="endpoint-url">{{ entry.ws_endpoint }}</span>
+        </div>
+        {% endif %}
+      </div>
+    </details>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state">
+      <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M12 6v6l4 2M12 2a10 10 0 100 20 10 10 0 000-20z"/></svg>
+      <p>No deployments yet. Configure your settings and hit Deploy.</p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+  const initStatus = {{ state.deploy_status | tojson }};
+  let logVisible = initStatus === 'deploying';
+
+  // Render log with syntax highlighting
+  function renderLog(raw) {
+    if (!raw) return;
+    const el = document.getElementById('deployLog');
+    el.classList.remove('hidden');
+    el.innerHTML = raw.split('\n').map(line => {
+      const cls = line.startsWith('ERROR') ? 'line-err'
+                : (line.startsWith('──') || line.startsWith('===')) ? 'line-head'
+                : line.includes('complete') || line.includes('success') || line.includes('succeeded') ? 'line-ok'
+                : '';
+      return '<span class="' + cls + '">' + escHtml(line) + '</span>';
+    }).join('\n');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // Initial log render
+  const initLog = {{ state.deploy_log | tojson }};
+  if (initLog) renderLog(initLog);
+
+  // Toggle log visibility
+  function toggleLog() {
+    const toggle = document.getElementById('logToggle');
+    const log = document.getElementById('deployLog');
+    logVisible = !logVisible;
+    toggle.classList.toggle('open', logVisible);
+    if (logVisible) {
+      log.classList.remove('hidden');
+    } else {
+      log.classList.add('hidden');
+    }
+  }
+
+  // Ensure log matches toggle state
+  if (!logVisible && initStatus !== 'deploying') {
+    document.getElementById('deployLog').classList.add('hidden');
+  }
+
+  // Update relative times and durations
+  document.querySelectorAll('.history-time[data-time]').forEach(el => {
+    const t = el.getAttribute('data-time');
+    if (t) el.textContent = timeAgo(t);
+  });
+  document.querySelectorAll('.history-duration[data-start]').forEach(el => {
+    const s = el.getAttribute('data-start');
+    const e = el.getAttribute('data-end');
+    el.textContent = formatDuration(s, e);
+  });
+
+  // Poll when deploying
+  let pollTimer = null;
+  if (initStatus === 'deploying') poll();
+
+  function poll() {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(async () => {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      applyStatus(data);
+      renderLog(data.deploy_log);
+      if (data.deploy_status === 'deploying') poll();
+    }, 1500);
+  }
+
+  function applyStatus(data) {
+    const badge = document.getElementById('statusBadge');
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+    const btn = document.getElementById('deployBtn');
+    const reset = document.getElementById('resetBtn');
+    const epSection = document.getElementById('endpointSection');
+    const epUrl = document.getElementById('endpointUrl');
+    const dlSection = document.getElementById('downloadSection');
+
+    badge.className = 'badge badge-' + data.deploy_status;
+    text.textContent = data.deploy_status;
+    dot.className = 'badge-dot' + (data.deploy_status === 'deploying' ? ' pulse' : '');
+
+    btn.disabled = (data.deploy_status === 'deploying');
+    if (data.deploy_status === 'done' || data.deploy_status === 'error') {
+      btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Redeploy';
+    }
+    reset.classList.toggle('hidden', data.deploy_status === 'idle');
+
+    if (data.ws_endpoint) {
+      epUrl.textContent = data.ws_endpoint;
+      epSection.classList.remove('hidden');
+    } else {
+      epSection.classList.add('hidden');
+    }
+
+    if (data.unity_ready) {
+      dlSection.classList.remove('hidden');
+    } else {
+      dlSection.classList.add('hidden');
+    }
+
+    // Auto-show logs when deploying
+    if (data.deploy_status === 'deploying' && !logVisible) {
+      logVisible = true;
+      document.getElementById('logToggle').classList.add('open');
+      document.getElementById('deployLog').classList.remove('hidden');
+    }
+  }
+
+  async function startDeploy() {
+    const btn = document.getElementById('deployBtn');
+    btn.disabled = true;
+    const errEl = document.getElementById('deployError');
+    errEl.classList.add('hidden');
+
+    const res = await fetch('/api/deploy', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error;
+      errEl.classList.remove('hidden');
+      btn.disabled = false;
+      return;
+    }
+    // Start polling
+    applyStatus({ deploy_status: 'deploying', ws_endpoint: '', unity_ready: false, deploy_log: '' });
+    poll();
+  }
+
+  async function resetDeploy() {
+    await fetch('/api/reset', { method: 'POST' });
+    location.reload();
+  }
+{% endblock %}

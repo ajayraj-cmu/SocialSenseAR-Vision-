@@ -1,13 +1,16 @@
 """
-AR CV Model Deployment Website — single cohesive page.
-All three steps (repo input, Modal auth, deploy + download) live on one page at /.
+XRBridge — AR Model Deployment Platform
+Vercel-inspired multi-page deployment dashboard.
+Pages: Overview (/), Deployments (/deployments), Settings (/settings).
 State persisted in state.json.
 """
 
+import datetime
 import json
 import os
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 
 from flask import Flask, render_template, request, jsonify, send_file
@@ -33,6 +36,7 @@ def load_state() -> dict:
         "deploy_log": "",
         "ws_endpoint": "",
         "unity_ready": False,
+        "deployment_history": [],  # list of past deployment records
     }
 
 
@@ -41,13 +45,25 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 
-# ── Main page ──────────────────────────────────────────────────────────────────
+# ── Page routes ───────────────────────────────────────────────────────────────
 
 @app.route("/")
-def index():
+def overview():
+    state = load_state()
+    return render_template("overview.html", state=state, active_tab="overview")
+
+
+@app.route("/deployments")
+def deployments():
+    state = load_state()
+    return render_template("deployments.html", state=state, active_tab="deployments")
+
+
+@app.route("/settings")
+def settings():
     state = load_state()
     env_text = "\n".join(f"{k}={v}" for k, v in state.get("env_vars", {}).items())
-    return render_template("index.html", state=state, env_text=env_text)
+    return render_template("settings.html", state=state, env_text=env_text, active_tab="settings")
 
 
 # ── API endpoints (called by JS fetch) ────────────────────────────────────────
@@ -119,9 +135,9 @@ def api_save_auth():
 def api_deploy():
     state = load_state()
     if not state.get("github_repo_url"):
-        return jsonify({"ok": False, "error": "No GitHub repo URL — fill in Step 1 first."})
+        return jsonify({"ok": False, "error": "No GitHub repo URL — configure it in Settings first."})
     if not state.get("modal_token_id") or not state.get("modal_token_secret"):
-        return jsonify({"ok": False, "error": "Modal token ID and secret required — fill in Step 2 first."})
+        return jsonify({"ok": False, "error": "Modal token ID and secret required — configure them in Settings first."})
     if state.get("deploy_status") == "deploying":
         return jsonify({"ok": False, "error": "Deploy already in progress."})
 
@@ -158,6 +174,12 @@ def api_reset():
     return jsonify({"ok": True})
 
 
+@app.route("/api/history")
+def api_history():
+    state = load_state()
+    return jsonify({"history": state.get("deployment_history", [])})
+
+
 @app.route("/download_unity")
 def download_unity():
     from unity_generator import generate_unity_client
@@ -167,7 +189,7 @@ def download_unity():
         return "No endpoint yet — deploy first.", 400
     zip_path = generate_unity_client(ws_endpoint)
     return send_file(zip_path, as_attachment=True,
-                     download_name="SocialSenseAR-Unity-Client.zip",
+                     download_name="XRBridge-Unity-Client.zip",
                      mimetype="application/zip")
 
 
@@ -176,6 +198,7 @@ def download_unity():
 def run_deploy(state: dict):
     import sys, shutil
     log_lines = []
+    deploy_id = "dpl_" + uuid.uuid4().hex[:8]
 
     def log(msg: str):
         log_lines.append(msg)
@@ -186,6 +209,35 @@ def run_deploy(state: dict):
             print(msg, flush=True)
         except (BrokenPipeError, OSError):
             pass
+
+    def _record_history_start(repo_url, ref):
+        s = load_state()
+        hist = s.get("deployment_history", [])
+        hist.append({
+            "id": deploy_id,
+            "status": "deploying",
+            "repo_url": repo_url,
+            "ref": ref,
+            "started_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "finished_at": "",
+            "ws_endpoint": "",
+            "log": "",
+        })
+        s["deployment_history"] = hist[-20:]
+        save_state(s)
+
+    def _record_history_end(status, ws_endpoint=""):
+        s = load_state()
+        hist = s.get("deployment_history", [])
+        for entry in reversed(hist):
+            if entry["id"] == deploy_id:
+                entry["status"] = status
+                entry["finished_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+                entry["ws_endpoint"] = ws_endpoint
+                entry["log"] = "\n".join(log_lines)
+                break
+        s["deployment_history"] = hist
+        save_state(s)
 
     try:
         log("── Starting deployment ──")
@@ -201,6 +253,8 @@ def run_deploy(state: dict):
             s["github_repo_url"] = repo_url
             s["github_ref"] = github_ref_parsed
             save_state(s)
+
+        _record_history_start(repo_url, state.get("github_ref", ""))
 
         log(f"Repo:   {repo_url}")
         if state.get("github_ref"):
@@ -221,20 +275,16 @@ def run_deploy(state: dict):
             shutil.rmtree(repo_dir)
 
         # Build authenticated clone URL if a PAT was provided.
-        # Injects token into HTTPS URL: https://<pat>@github.com/owner/repo
-        # The token is never logged — only the sanitised URL is shown.
         github_pat = state.get("github_pat", "").strip()
         clone_url = repo_url
         display_url = repo_url
         if github_pat:
-            # Normalise: strip any existing credentials from URL first
             import re as _re
             clean = _re.sub(r'https?://[^@]+@', 'https://', repo_url)
             if clean.startswith("https://"):
                 clone_url = clean.replace("https://", f"https://x-access-token:{github_pat}@", 1)
-                display_url = clean  # safe to log
+                display_url = clean
             else:
-                # SSH or other scheme — can't inject PAT; log a warning
                 log("WARNING: PAT provided but repo URL is not HTTPS — PAT ignored.")
         github_ref = state.get("github_ref", "").strip()
         clone_cmd = ["git", "clone", "--depth=1"]
@@ -314,6 +364,8 @@ def run_deploy(state: dict):
         s["unity_ready"] = True
         s["deploy_log"] = "\n".join(log_lines)
         save_state(s)
+
+        _record_history_end("done", ws_endpoint)
         log("── Deployment complete ──")
 
     except Exception as e:
@@ -322,6 +374,7 @@ def run_deploy(state: dict):
         s["deploy_status"] = "error"
         s["deploy_log"] = "\n".join(log_lines)
         save_state(s)
+        _record_history_end("error")
 
 
 def _extract_endpoint(output: str) -> str:
@@ -336,6 +389,4 @@ def _extract_endpoint(output: str) -> str:
 # ── Run ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # debug=False prevents the Werkzeug reloader from restarting the process
-    # mid-deploy and killing background deploy threads.
     app.run(host="0.0.0.0", port=5002, debug=False)
