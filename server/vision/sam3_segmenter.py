@@ -97,14 +97,11 @@ class SAM3Segmenter:
 
         # Dynamic prompt control.
         #
-        # NOTE: For interactive clients (Unity Editor, webcam clients), it's much
-        # easier to validate end-to-end connectivity if at least one prompt is
-        # active by default. We default to "person" so users immediately see an
-        # overlay without needing a successful voice/text command round-trip.
-        #
-        # Typed/voice commands can still add/remove prompts at runtime, and a
-        # "clear" will still set this to empty.
-        self._active_prompts: list[str] = ["person"]  # Start with "person" for connectivity testing
+        # Start with empty prompts — "person" is excluded by default. When a client
+        # connects, the WebSocket handler calls set_active_prompts(set()) to clear
+        # any state from the previous session. Users add tracked objects via voice
+        # or typed commands (e.g. "blur laptop", "highlight monitor").
+        self._active_prompts: list[str] = []
         self._prompts_lock = threading.Lock()
 
         # Mask cache: prompt -> (mask_u8, timestamp, frame_gen) for non-queried prompts

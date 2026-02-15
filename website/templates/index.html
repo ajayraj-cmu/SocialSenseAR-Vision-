@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AR CV Deployer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #080b10;
+      --surface:   #0f1420;
+      --border:    #1e2740;
+      --accent:    #3b82f6;
+      --accent2:   #10b981;
+      --warn:      #f59e0b;
+      --danger:    #ef4444;
+      --text:      #e2e8f0;
+      --muted:     #64748b;
+      --input-bg:  #0a0f1a;
+      --radius:    10px;
+      --font:      'Inter', 'Segoe UI', system-ui, sans-serif;
+      --mono:      'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      background: rgba(8,11,16,0.92);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+    .logo {
+      width: 28px; height: 28px;
+      background: var(--accent);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 800; color: #fff;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
+    header .sub { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+    /* ── Progress bar (top of page) ── */
+    .progress-bar {
+      height: 2px;
+      background: var(--border);
+      position: sticky;
+      top: 61px;
+      z-index: 99;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      transition: width .5s ease;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 760px; margin: 0 auto; padding: 48px 24px 80px; }
+
+    /* ── Step pill ── */
+    .step-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .step-pill {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: .5px;
+      text-transform: uppercase;
+    }
+    .step-pill.active { border-color: var(--accent); color: var(--accent); }
+    .step-pill.done   { border-color: var(--accent2); color: var(--accent2); }
+    .step-line { flex: 1; height: 1px; background: var(--border); }
+
+    /* ── Card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 28px 24px;
+      margin-bottom: 16px;
+      transition: border-color .2s;
+    }
+    .card:focus-within { border-color: #334155; }
+    .card.done-card { border-color: #134e35; }
+    .card.error-card { border-color: #4b1111; }
+
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .card-desc {
+      color: var(--muted);
+      font-size: 12.5px;
+      margin-bottom: 20px;
+    }
+
+    /* ── Form fields ── */
+    label {
+      display: block;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 6px;
+    }
+    input[type=text], input[type=password], textarea {
+      width: 100%;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12.5px;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color .15s;
+      resize: vertical;
+    }
+    input[type=text]:focus,
+    input[type=password]:focus,
+    textarea:focus { border-color: var(--accent); }
+    textarea { height: 160px; }
+    .field { margin-bottom: 18px; }
+    .hint {
+      margin-top: 5px;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .hint a { color: #4a7fc1; text-decoration: none; }
+    .hint a:hover { text-decoration: underline; }
+    .optional-tag {
+      font-weight: 400;
+      font-size: 10.5px;
+      color: var(--muted);
+      text-transform: none;
+      letter-spacing: 0;
+      background: #1a1f2e;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    /* Repo URL + branch side by side */
+    .repo-row { display: flex; gap: 14px; align-items: flex-start; }
+    @media(max-width:540px) { .repo-row { flex-direction: column; } .repo-row > div { width: 100% !important; } }
+
+    /* Two-column grid for auth */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media(max-width:540px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 9px 20px;
+      border-radius: 6px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+      font-family: var(--font);
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary  { background: var(--accent);  color: #fff; }
+    .btn-success  { background: var(--accent2); color: #fff; }
+    .btn-warning  { background: var(--warn);    color: #000; }
+    .btn-ghost    { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+    .btn-danger   { background: #2a0a0a; color: var(--danger); border: 1px solid #4b1111; }
+    .btn:not(:last-child) { margin-right: 8px; }
+
+    .save-confirm {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; color: var(--accent2);
+      opacity: 0; transition: opacity .3s;
+      vertical-align: middle; margin-left: 10px;
+    }
+    .save-confirm.show { opacity: 1; }
+
+    /* ── Saved pill shown in card title area ── */
+    .saved-badge {
+      display: inline-block;
+      background: #0d2e1a;
+      border: 1px solid #134e35;
+      border-radius: 20px;
+      padding: 2px 9px;
+      font-size: 11px;
+      color: var(--accent2);
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    /* ── Deploy section ── */
+    .deploy-card { border-color: #1e3a5f; }
+
+    .inline-error {
+      background: #1e0808;
+      border: 1px solid #4b1111;
+      border-radius: 6px;
+      color: #f87171;
+      font-size: 12px;
+      padding: 8px 12px;
+      margin-bottom: 14px;
+    }
+
+    /* ── Log terminal ── */
+    .terminal {
+      background: #050810;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin-top: 16px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: #94a3b8;
+      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.7;
+    }
+    .terminal:empty { display: none; }
+    .terminal .line-err  { color: #f87171; }
+    .terminal .line-ok   { color: var(--accent2); }
+    .terminal .line-head { color: #e2e8f0; font-weight: 600; }
+
+    /* ── Status badge ── */
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .badge-idle     { background:#111827; border-color:#1e2740; color:#64748b; }
+    .badge-deploying{ background:#0c1e3b; border-color:#1e3a5f; color:#60a5fa; }
+    .badge-done     { background:#0d2e1a; border-color:#134e35; color:#34d399; }
+    .badge-error    { background:#1e0808; border-color:#4b1111; color:#f87171; }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor;
+    }
+    .dot.pulse { animation: pulse 1.2s infinite; }
+    @keyframes pulse {
+      0%,100% { opacity:1; } 50% { opacity:.3; }
+    }
+
+    /* ── Endpoint display ── */
+    .endpoint-box {
+      background: #050f1a;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .endpoint-box .url {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #60a5fa;
+      flex: 1;
+      word-break: break-all;
+    }
+    .copy-btn {
+      background: #0f2040;
+      border: 1px solid #1e3a5f;
+      border-radius: 5px;
+      color: #94a3b8;
+      font-size: 11px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-family: var(--font);
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: #1a3555; }
+
+    /* ── Download card ── */
+    .download-card {
+      border-color: #1a3a20;
+      background: linear-gradient(135deg, #0d1f12 0%, #0f1420 100%);
+    }
+    .download-card .card-title { color: var(--accent2); }
+
+    .steps-list {
+      list-style: none;
+      margin: 14px 0 20px;
+    }
+    .steps-list li {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 6px 0;
+      font-size: 13px;
+      color: #94a3b8;
+      border-bottom: 1px solid #0f1a20;
+    }
+    .steps-list li:last-child { border-bottom: none; }
+    .steps-list .num {
+      background: #0d2e1a;
+      border: 1px solid #134e35;
+      border-radius: 50%;
+      width: 20px; height: 20px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: var(--accent2);
+      flex-shrink: 0; margin-top: 1px;
+    }
+
+    /* ── Section divider ── */
+    .divider {
+      display: flex; align-items: center; gap: 12px;
+      margin: 28px 0;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+    .divider::before, .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1e2740; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">AR</div>
+  <h1>AR CV Model Deployer</h1>
+  <span class="sub">Powered by Modal + SocialSenseAR</span>
+</header>
+
+<div class="progress-bar">
+  <div class="progress-fill" id="progressFill" style="width:0%"></div>
+</div>
+
+<div class="page">
+
+  <!-- ────────────────────────────────────────────
+       STEP 1 — Repo & Secrets
+  ──────────────────────────────────────────── -->
+  <div class="step-row">
+    <span class="step-pill active" id="pill1">Step 1</span>
+    <div class="step-line"></div>
+    <span class="step-pill" id="pill2">Step 2</span>
+    <div class="step-line"></div>
+    <span class="step-pill" id="pill3">Step 3</span>
+  </div>
+
+  <div class="card" id="card1">
+    <div class="card-title">
+      Your CV Model Repo
+      <span class="saved-badge hidden" id="badge1">Saved ✓</span>
+    </div>
+    <div class="card-desc">
+      Point to a public or private GitHub repo containing a computer vision model.
+      Add a Personal Access Token to access private repos.
+    </div>
+
+    <div class="repo-row">
+      <div class="field" style="flex:1">
+        <label>GitHub Repo URL</label>
+        <input type="text" id="repoUrl"
+               placeholder="https://github.com/yourname/your-cv-model"
+               value="{{ state.github_repo_url }}">
+      </div>
+      <div class="field" style="width:180px">
+        <label>
+          Branch / Tag
+          <span class="optional-tag">optional</span>
+        </label>
+        <input type="text" id="githubRef"
+               placeholder="main"
+               value="{{ state.github_ref }}">
+      </div>
+    </div>
+    <div class="hint" style="margin-top:-12px;margin-bottom:18px" id="urlHint">
+      Public or private HTTPS URL. Leave Branch blank to use the repo's default branch.
+      You can also specify a tag (e.g. <code style="color:#94a3b8">v1.2</code>).
+    </div>
+
+    <div class="field">
+      <label>
+        GitHub Personal Access Token
+        <span class="optional-tag">optional — required for private repos</span>
+      </label>
+      <input type="password" id="githubPat"
+             placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+             value="{{ state.github_pat }}">
+      <div class="hint">
+        Needs <strong style="color:#94a3b8">repo</strong> scope (read-only is fine).
+        Generate one at
+        <a href="https://github.com/settings/tokens/new?scopes=repo&description=AR+CV+Deployer"
+           target="_blank" rel="noopener">github.com/settings/tokens</a>.
+        The token is never logged or sent anywhere except the git clone command.
+      </div>
+    </div>
+
+    <div class="field">
+      <label>API Keys &amp; Env Vars</label>
+      <textarea id="envVars"
+                placeholder="OPENAI_API_KEY=sk-...&#10;GEMINI_API_KEY=AIza...&#10;HF_SAM_TOKEN=hf_...&#10;HF_TOKEN=hf_...&#10;MY_CUSTOM_VAR=value">{{ env_text }}</textarea>
+      <div class="hint">
+        One per line — <code style="color:#94a3b8">KEY=VALUE</code>.
+        Required for the SAM3 pipeline: <code style="color:#94a3b8">OPENAI_API_KEY</code>,
+        <code style="color:#94a3b8">GEMINI_API_KEY</code>, <code style="color:#94a3b8">HF_SAM_TOKEN</code>.
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveRepo()">Save</button>
+    <span class="save-confirm" id="confirm1">✓ Saved</span>
+  </div>
+
+  <div class="divider">Modal Authentication</div>
+
+  <!-- ────────────────────────────────────────────
+       STEP 2 — Modal Auth
+  ──────────────────────────────────────────── -->
+  <div class="card" id="card2">
+    <div class="card-title">
+      Modal Credentials
+      <span class="saved-badge hidden" id="badge2">Saved ✓</span>
+    </div>
+    <div class="card-desc">
+      Your tokens authenticate the deployment. Get them at
+      <a href="https://modal.com/settings" target="_blank" rel="noopener"
+         style="color:#4a7fc1">modal.com/settings</a>
+      → API Tokens → New Token.
+    </div>
+
+    <div class="grid-2">
+      <div class="field">
+        <label>Token ID</label>
+        <input type="text" id="tokenId"
+               placeholder="ak-xxxxxxxxxxxxxxxxxxxx"
+               value="{{ state.modal_token_id }}">
+      </div>
+      <div class="field">
+        <label>Token Secret</label>
+        <input type="password" id="tokenSecret"
+               placeholder="as-xxxxxxxxxxxxxxxxxxxx"
+               value="{{ state.modal_token_secret }}">
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveAuth()">Save</button>
+    <span class="save-confirm" id="confirm2">✓ Saved</span>
+  </div>
+
+  <div class="divider">Deploy</div>
+
+  <!-- ────────────────────────────────────────────
+       STEP 3 — Deploy + Download
+  ──────────────────────────────────────────── -->
+  <div class="card deploy-card" id="card3">
+    <div class="card-title">Deploy to Modal GPU</div>
+    <div class="card-desc">
+      Clones your repo, wraps it in the SocialSenseAR backend,
+      spins up an A10G GPU on Modal, and exposes a WebSocket endpoint
+      your Unity client will connect to.
+    </div>
+
+    <div class="inline-error hidden" id="deployError"></div>
+
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <button class="btn btn-success" id="deployBtn" onclick="startDeploy()">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+             viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        Deploy
+      </button>
+      <span class="status-badge badge-idle" id="statusBadge">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">idle</span>
+      </span>
+      <button class="btn btn-ghost btn-danger hidden" id="resetBtn"
+              onclick="resetDeploy()" style="margin-left:auto;font-size:12px">
+        Reset
+      </button>
+    </div>
+
+    <!-- Endpoint display -->
+    <div class="endpoint-box hidden" id="endpointBox">
+      <span style="font-size:11px;color:var(--muted);flex-shrink:0">WS</span>
+      <span class="url" id="endpointUrl"></span>
+      <button class="copy-btn" onclick="copyEndpoint()">Copy</button>
+    </div>
+
+    <!-- Deploy log terminal -->
+    <div class="terminal" id="deployLog"></div>
+  </div>
+
+  <!-- ────────────────────────────────────────────
+       DOWNLOAD (shown after deploy)
+  ──────────────────────────────────────────── -->
+  <div class="card download-card hidden" id="downloadCard">
+    <div class="card-title">Unity Client Ready</div>
+    <div class="card-desc">
+      Your Unity project has been configured with the deployed endpoint.
+      Download, unzip, open in Unity, and press Play.
+    </div>
+
+    <ul class="steps-list">
+      <li><span class="num">1</span> Download and unzip the file</li>
+      <li><span class="num">2</span> Open the folder in Unity (Unity 6 recommended)</li>
+      <li><span class="num">3</span> Press <strong style="color:#e2e8f0">Play</strong> — runs in <strong style="color:#e2e8f0">Webcam mode</strong> by default</li>
+      <li><span class="num">4</span> To use a headset: select the <code style="color:#94a3b8">SocialSenseClient</code> GameObject → set <strong style="color:#e2e8f0">Input Mode</strong> to <code style="color:#94a3b8">AR</code></li>
+    </ul>
+
+    <a href="/download_unity" id="downloadLink">
+      <button class="btn btn-success" style="font-size:14px;padding:11px 24px">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+             viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+        Download Unity Client (.zip)
+      </button>
+    </a>
+  </div>
+
+</div><!-- /page -->
+
+<script>
+  // ── GitHub URL parser (mirrors server-side _parse_github_url) ────────────
+  function parseGithubUrl(raw) {
+    const url = raw.trim().replace(/\/$/, '');
+    // tree/blob URL: extract repo + branch
+    const m = url.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+?)(?:\.git)?\/(tree|blob)\/([^/]+)/i);
+    if (m) return { repoUrl: m[1], ref: m[3] };
+    // plain URL
+    return { repoUrl: url.replace(/\.git$/i, ''), ref: null };
+  }
+
+  function onRepoUrlInput() {
+    const raw = document.getElementById('repoUrl').value;
+    const hint = document.getElementById('urlHint');
+    const refField = document.getElementById('githubRef');
+    const parsed = parseGithubUrl(raw);
+
+    if (parsed.ref) {
+      // Auto-fill branch field only if user hasn't typed one
+      if (!refField.value.trim()) refField.value = parsed.ref;
+      // Update the repo URL field to the clean clone URL
+      document.getElementById('repoUrl').value = parsed.repoUrl;
+      hint.innerHTML = `<span style="color:var(--accent2)">✓ Parsed — Clone URL: <code style="color:#94a3b8">${escHtml(parsed.repoUrl)}</code>, Branch: <code style="color:#94a3b8">${escHtml(parsed.ref)}</code></span>`;
+    } else {
+      hint.innerHTML = 'Public or private HTTPS URL. Leave Branch blank to use the repo\'s default branch. You can also specify a tag (e.g. <code style="color:#94a3b8">v1.2</code>).';
+    }
+    updateProgress();
+  }
+
+  // ── Restore state from server on load ─────────────────────────────────────
+  const initState = {
+    github_repo_url: {{ state.github_repo_url | tojson }},
+    modal_token_id:  {{ state.modal_token_id  | tojson }},
+    deploy_status:   {{ state.deploy_status   | tojson }},
+    ws_endpoint:     {{ state.ws_endpoint     | tojson }},
+    unity_ready:     {{ state.unity_ready     | tojson }},
+  };
+
+  // Show saved badges if values already stored
+  if (initState.github_repo_url) showBadge('badge1');
+  if (initState.modal_token_id)  showBadge('badge2');
+
+  // Restore deploy state
+  applyStatus(initState.deploy_status, initState.ws_endpoint, initState.unity_ready);
+
+  // If deploy was in progress when page loaded, resume polling
+  if (initState.deploy_status === 'deploying') poll();
+
+  // ── Progress bar ──────────────────────────────────────────────────────────
+  function updateProgress() {
+    const hasRepo  = document.getElementById('repoUrl').value.trim() !== '';
+    const hasAuth  = document.getElementById('tokenId').value.trim() !== '';
+    const status   = document.getElementById('statusText').textContent;
+    let pct = 0;
+    if (hasRepo)  pct = 33;
+    if (hasRepo && hasAuth) pct = 66;
+    if (status === 'done') pct = 100;
+    document.getElementById('progressFill').style.width = pct + '%';
+
+    // Pills
+    document.getElementById('pill1').className = 'step-pill ' + (hasRepo ? 'done' : 'active');
+    document.getElementById('pill2').className = 'step-pill ' + (hasRepo && hasAuth ? 'done' : hasRepo ? 'active' : '');
+    document.getElementById('pill3').className = 'step-pill ' + (status === 'done' ? 'done' : (hasRepo && hasAuth ? 'active' : ''));
+  }
+
+  document.getElementById('repoUrl').addEventListener('input', onRepoUrlInput);
+  document.getElementById('tokenId').addEventListener('input', updateProgress);
+  updateProgress();
+
+  // ── Save helpers ──────────────────────────────────────────────────────────
+  function showBadge(id) {
+    document.getElementById(id).classList.remove('hidden');
+  }
+  function flashConfirm(id) {
+    const el = document.getElementById(id);
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 2500);
+  }
+
+  async function saveRepo() {
+    const url = document.getElementById('repoUrl').value.trim();
+    const ref = document.getElementById('githubRef').value.trim();
+    const pat = document.getElementById('githubPat').value.trim();
+    const env = document.getElementById('envVars').value;
+    if (!url) { alert('Please enter a GitHub repo URL.'); return; }
+    await fetch('/api/save_repo', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ github_repo_url: url, github_ref: ref, github_pat: pat, env_vars: env }),
+    });
+    showBadge('badge1');
+    flashConfirm('confirm1');
+    updateProgress();
+  }
+
+  async function saveAuth() {
+    const id  = document.getElementById('tokenId').value.trim();
+    const sec = document.getElementById('tokenSecret').value.trim();
+    if (!id || !sec) { alert('Please enter both Token ID and Token Secret.'); return; }
+    await fetch('/api/save_auth', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ modal_token_id: id, modal_token_secret: sec }),
+    });
+    showBadge('badge2');
+    flashConfirm('confirm2');
+    updateProgress();
+  }
+
+  // ── Deploy ────────────────────────────────────────────────────────────────
+  let pollTimer = null;
+
+  async function startDeploy() {
+    // Auto-save both sections before deploying
+    const url = document.getElementById('repoUrl').value.trim();
+    const ref = document.getElementById('githubRef').value.trim();
+    const pat = document.getElementById('githubPat').value.trim();
+    const env = document.getElementById('envVars').value;
+    const id  = document.getElementById('tokenId').value.trim();
+    const sec = document.getElementById('tokenSecret').value.trim();
+    if (!url) { showError('Fill in your GitHub repo URL first (Step 1).'); return; }
+    if (!id || !sec) { showError('Fill in your Modal credentials first (Step 2).'); return; }
+
+    await fetch('/api/save_repo', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ github_repo_url: url, github_ref: ref, github_pat: pat, env_vars: env }),
+    });
+    await fetch('/api/save_auth', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ modal_token_id: id, modal_token_secret: sec }),
+    });
+
+    hideError();
+    const res = await fetch('/api/deploy', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) { showError(data.error); return; }
+    poll();
+  }
+
+  function poll() {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(async () => {
+      const res  = await fetch('/api/status');
+      const data = await res.json();
+      applyStatus(data.deploy_status, data.ws_endpoint, data.unity_ready);
+      renderLog(data.deploy_log);
+      if (data.deploy_status === 'deploying') poll();
+    }, 1500);
+  }
+
+  function applyStatus(status, endpoint, unityReady) {
+    const badge = document.getElementById('statusBadge');
+    const dot   = document.getElementById('statusDot');
+    const text  = document.getElementById('statusText');
+    const btn   = document.getElementById('deployBtn');
+    const reset = document.getElementById('resetBtn');
+    const epBox = document.getElementById('endpointBox');
+    const epUrl = document.getElementById('endpointUrl');
+    const dlCard= document.getElementById('downloadCard');
+
+    badge.className = 'status-badge badge-' + status;
+    text.textContent = status;
+    dot.className = 'dot' + (status === 'deploying' ? ' pulse' : '');
+
+    btn.disabled = (status === 'deploying');
+    reset.classList.toggle('hidden', status === 'idle');
+
+    if (endpoint) {
+      epUrl.textContent = endpoint;
+      epBox.classList.remove('hidden');
+    } else {
+      epBox.classList.add('hidden');
+    }
+
+    if (unityReady) {
+      dlCard.classList.remove('hidden');
+    }
+    updateProgress();
+  }
+
+  function renderLog(raw) {
+    if (!raw) return;
+    const el = document.getElementById('deployLog');
+    el.innerHTML = raw.split('\n').map(line => {
+      const cls = line.startsWith('ERROR') ? 'line-err'
+                : (line.startsWith('──') || line.startsWith('===')) ? 'line-head'
+                : line.includes('complete') || line.includes('success') ? 'line-ok'
+                : '';
+      return `<span class="${cls}">${escHtml(line)}</span>`;
+    }).join('\n');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  async function resetDeploy() {
+    await fetch('/api/reset', { method: 'POST' });
+    applyStatus('idle', '', false);
+    document.getElementById('deployLog').innerHTML = '';
+    document.getElementById('downloadCard').classList.add('hidden');
+    hideError();
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function showError(msg) {
+    const el = document.getElementById('deployError');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+  function hideError() {
+    document.getElementById('deployError').classList.add('hidden');
+  }
+  function copyEndpoint() {
+    const url = document.getElementById('endpointUrl').textContent;
+    navigator.clipboard.writeText(url).then(() => {
+      const btn = event.target;
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = orig, 1800);
+    });
+  }
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>

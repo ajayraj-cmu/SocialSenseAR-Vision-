@@ -1,0 +1,11 @@
+# Runtime state (contains API keys, tokens)
+state.json
+
+# Clone workspace (created at deploy time)
+workspace/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

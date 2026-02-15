@@ -1413,19 +1413,42 @@ class VoiceAgent:
         re.IGNORECASE,
     )
 
+    # Conversation mode: client-side-only animation — server must NOT apply any effect.
+    # Intercept before Gemini so it cannot hallucinate a color/effect for this phrase.
+    # The utterance is echoed back via last_command so the Unity client can detect it
+    # and trigger the ConversationModeEffect animation.
+    _RE_CONVERSATION_MODE = re.compile(
+        r'(?:enter\s+|start\s+|activate\s+|begin\s+)?'
+        r'(?:conversation|convo|focus|cinema|cinematic)\s+mode'
+        r'|conversation\s+(?:on|start|begin)',
+        re.IGNORECASE,
+    )
+
+    _RE_CONVERSATION_MODE_OFF = re.compile(
+        r'(?:exit|leave|end|stop|deactivate|quit)\s+'
+        r'(?:conversation|convo|focus|cinema|cinematic)\s*(?:mode)?'
+        r'|conversation\s+(?:off|end|stop)',
+        re.IGNORECASE,
+    )
+
     def _execute_command(self, utterance: str):
-        """Execute command via two-phase Gemini Vision flow.
+        """Execute a voice/text command.
 
-        Phase 1 (blocking): Snapshot current frame + send command to Gemini Vision.
-                            Vision determines targets, effects, exact RGB values, and
-                            accounts for persistent state (incremental commands like
-                            "make it darker" or "more transparent").
+        Routing is controlled by ``config.gemini_vision_enabled``:
 
-        Phase 2 (async):    After SAM3 applies the plan, snapshot the composite frame
-                            and ask Gemini Vision for correcting feedback. Applied in
-                            background — does not block the user.
+        * **Vision ON**  (gemini_vision_enabled=True):
+            Phase 1 — snapshot the current frame and send it to Gemini Vision to
+            determine targets, effects, and exact RGB values, accounting for
+            persistent state (incremental commands like "make it darker").
+            Phase 2 (async) — after SAM3 renders the frame, ask Gemini Vision
+            for corrective feedback.
 
-        Only "clear/reset" style commands bypass vision (no scene context needed).
+        * **Vision OFF** (gemini_vision_enabled=False, default):
+            Skips both vision calls entirely.  Uses the fast regex parser first;
+            falls back to the text-only Gemini planner for complex phrasing.
+            No camera frame is inspected, so there is zero vision-API latency.
+
+        "clear/reset" style commands always bypass vision regardless of the flag.
         """
         # Normalize Whisper artifacts
         utterance = re.sub(r'[.,!?;:]+', ' ', utterance).strip()
@@ -1441,7 +1464,7 @@ class VoiceAgent:
 
         t0 = time.time()
 
-        # --- Instant clear/reset (no vision needed) ---
+        # --- Instant clear/reset (no vision needed regardless of flag) ---
         if self._RE_INSTANT_CLEAR.match(utterance):
             plan = CommandPlan(
                 targets=[], effect_type="none", intensity=0.0,
@@ -1451,16 +1474,53 @@ class VoiceAgent:
             self._apply_plan(plan, utterance, t0, run_phase2=False)
             return
 
-        # --- Phase 1: Snapshot frame → Gemini Vision → structured plan ---
+        # --- Conversation Mode intercept (client-side animation, no server effect) ---
+        # These phrases must NEVER reach Gemini — Gemini will hallucinate a colour
+        # or blur effect and paint the person blue/blurred.  Instead we return a
+        # no-op plan immediately so the server applies nothing, and the utterance
+        # is echoed back in last_command so the Unity client can start its own
+        # ConversationModeEffect animation.
+        if self._RE_CONVERSATION_MODE.search(utterance):
+            plan = CommandPlan(
+                targets=[], effect_type="none", intensity=0.0,
+                action="none", reasoning="conversation mode: client-side animation only",
+            )
+            logger.info(f"Conversation mode detected — echoing to client, no server effect")
+            self._apply_plan(plan, utterance, t0, run_phase2=False)
+            return
+
+        if self._RE_CONVERSATION_MODE_OFF.search(utterance):
+            plan = CommandPlan(
+                targets=[], effect_type="none", intensity=0.0,
+                action="none", reasoning="conversation mode off: client-side only",
+            )
+            logger.info(f"Conversation mode OFF detected — echoing to client")
+            self._apply_plan(plan, utterance, t0, run_phase2=False)
+            return
+
+        # Decide which planning path to take
+        vision_enabled = getattr(self._config, "gemini_vision_enabled", True)
+
+        if vision_enabled:
+            self._execute_command_with_vision(utterance, t0)
+        else:
+            self._execute_command_text_only(utterance, t0)
+
+    def _execute_command_with_vision(self, utterance: str, t0: float):
+        """Phase 1: Snapshot frame → Gemini Vision → structured plan.
+
+        Only called when config.gemini_vision_enabled is True.
+        """
         with self._frame_lock:
             frame_bgr = self._latest_frame.copy() if self._latest_frame is not None else None
 
         if frame_bgr is None:
-            logger.warning("No frame available yet — skipping command")
+            logger.warning("No frame available yet — falling back to text-only planner")
+            self._execute_command_text_only(utterance, t0)
             return
 
         persistent_state = self._get_persistent_state_snapshot()
-        logger.info(f"Phase 1: vision planning for \"{utterance}\"")
+        logger.info(f"Phase 1 (vision): planning for \"{utterance}\"")
         vision_result = self._scene.plan_from_vision(utterance, frame_bgr, persistent_state)
 
         plan = self._vision_result_to_command_plan(vision_result)
@@ -1471,8 +1531,24 @@ class VoiceAgent:
             plan.targets = list(dict.fromkeys(plan.targets + new_prompts))
 
         logger.info(f"Vision plan: {plan.action} {plan.effect_type} → {plan.targets}")
-
         self._apply_plan(plan, utterance, t0, run_phase2=True)
+
+    def _execute_command_text_only(self, utterance: str, t0: float):
+        """Text-only planning path — no camera frame, no vision API call.
+
+        Used when config.gemini_vision_enabled is False.
+        Tries the fast regex parser first, then falls back to the text-only
+        Gemini planner (VoiceCommandPlanner) for complex phrasing.
+        """
+        with self._state_lock:
+            known = self._known_objects.copy()
+            active = self._active_effects.copy()
+
+        conv_state = self._conversation_state.copy()
+        logger.info(f"Text-only planning for \"{utterance}\"")
+        plan = self._planner.plan_command(utterance, known, active, conv_state)
+        logger.info(f"Text plan: {plan.action} {plan.effect_type} → {plan.targets}")
+        self._apply_plan(plan, utterance, t0, run_phase2=False)
 
     def _apply_plan(self, plan: CommandPlan, utterance: str, t0: float, run_phase2: bool):
         """Apply a resolved CommandPlan: update state, notify orchestrator, schedule Phase 2."""
