@@ -110,6 +110,10 @@ class PersonaPlexBridge:
         params = {
             "text_prompt": self._text_prompt,
             "voice_prompt": self._voice_prompt,
+            "text_temperature": str(self._text_temperature),
+            "text_topk": str(self._text_topk),
+            "audio_temperature": str(self._audio_temperature),
+            "audio_topk": str(self._audio_topk),
         }
         sep = "&" if "?" in self._base_url else "?"
         return self._base_url + sep + urlencode(params)
@@ -164,19 +168,23 @@ class PersonaPlexBridge:
                         opus_bytes = data[1:]
                         self._opus_reader.append_bytes(opus_bytes)
 
-                        # Decode available PCM
-                        pcm_24k = self._opus_reader.read_pcm()
+                        # Decode available PCM (flatten to 1D in case sphn returns 2D)
+                        pcm_24k = self._opus_reader.read_pcm().flatten()
                         if pcm_24k.shape[-1] > 0:
                             if self._audio_msgs_recv == 1:
-                                logger.info(f"PersonaPlex: first audio response ({pcm_24k.shape[-1]} samples)")
+                                logger.info(f"PersonaPlex: first audio response ({pcm_24k.shape[-1]} samples, "
+                                            f"dtype={pcm_24k.dtype})")
                             # Resample 24kHz → 16kHz
                             pcm_16k = _resample_linear(pcm_24k, _PERSONAPLEX_SAMPLE_RATE, _UNITY_SAMPLE_RATE)
                             # Convert to PCM16 bytes
                             pcm16_bytes = (pcm_16k * 32767).astype(np.int16).tobytes()
 
-                            # Buffer for Unity
+                            # Buffer for Unity / test client
                             with self._audio_response_lock:
                                 self._audio_response_buffer.extend(pcm16_bytes)
+                                if self._audio_msgs_recv <= 3:
+                                    logger.info(f"PersonaPlex: buffered {len(pcm16_bytes)}B audio "
+                                                f"(total buffer={len(self._audio_response_buffer)}B)")
 
                             # Callback
                             if self._on_audio:
@@ -190,8 +198,9 @@ class PersonaPlexBridge:
                         self._text_tokens_recv += 1
                         text_token = data[1:].decode("utf-8", errors="replace")
                         self._text_buffer += text_token
-                        if self._text_tokens_recv <= 5:
-                            logger.info(f"PersonaPlex text token #{self._text_tokens_recv}: '{text_token}' (accumulated: '{self._text_buffer[:100]}')")
+                        # Log all tokens so we can see what PersonaPlex generates
+                        logger.info(f"PersonaPlex text #{self._text_tokens_recv}: '{text_token}' | full: '{self._text_buffer[-200:]}'")
+
 
                         if self._on_text:
                             try:
@@ -255,6 +264,12 @@ class PersonaPlexBridge:
 
         # PCM16 bytes → float32 numpy (keep float32 dtype — sphn requires it)
         samples = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / np.float32(32768.0)
+
+        # Log audio levels periodically to verify we're sending real audio
+        if self._audio_frames_sent % 250 == 0:
+            rms = float(np.sqrt(np.mean(samples ** 2)))
+            peak = float(np.max(np.abs(samples)))
+            logger.info(f"PersonaPlex audio input: rms={rms:.4f} peak={peak:.4f} samples={len(samples)}")
 
         # Resample to 24kHz if needed
         if sample_rate != _PERSONAPLEX_SAMPLE_RATE:

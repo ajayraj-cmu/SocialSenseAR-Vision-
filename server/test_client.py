@@ -52,6 +52,117 @@ from server.dashboard import Dashboard
 
 
 
+AUDIO_RESPONSE_PREFIX = b'\x01'
+
+
+class AudioPlayer:
+    """Streams PCM16 16kHz mono audio from server voice responses via sounddevice.
+
+    Uses a ring buffer + continuous OutputStream for gap-free playback.
+    """
+
+    BUFFER_SECONDS = 10  # ring buffer capacity
+
+    def __init__(self, sample_rate: int = 16000):
+        self._sample_rate = sample_rate
+        self._buf_size = sample_rate * self.BUFFER_SECONDS
+        self._buffer = np.zeros(self._buf_size, dtype=np.float32)
+        self._write_pos = 0
+        self._read_pos = 0
+        self._lock = threading.Lock()
+        self._stream = None
+        self._available = False
+        self._chunks_received = 0
+        self._samples_written = 0
+        self._was_silent = True  # Track silence→audio transition for fade-in
+
+    def start(self):
+        try:
+            import sounddevice as sd
+            self._stream = sd.OutputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                dtype='float32',
+                callback=self._audio_callback,
+                blocksize=1024,
+            )
+            self._stream.start()
+            self._available = True
+            print(f"Audio playback: server -> speaker (PCM16 {self._sample_rate}Hz, streaming)")
+        except ImportError:
+            print("Audio playback unavailable (pip install sounddevice)")
+            self._available = False
+        except Exception as e:
+            print(f"Audio playback error: {e}")
+            self._available = False
+
+    @property
+    def available(self):
+        return self._available
+
+    def enqueue(self, pcm16_bytes: bytes):
+        """Add PCM16 audio data to the ring buffer for continuous playback."""
+        samples = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        n = len(samples)
+
+        self._chunks_received += 1
+        if self._chunks_received == 1:
+            print(f"  [AudioPlayer] First audio chunk: {n} samples ({n / self._sample_rate * 1000:.0f}ms)")
+        elif self._chunks_received % 200 == 0:
+            with self._lock:
+                buffered = (self._write_pos - self._read_pos) % self._buf_size
+            print(f"  [AudioPlayer] {self._chunks_received} chunks, {self._samples_written} samples written, "
+                  f"buffered={buffered} ({buffered / self._sample_rate * 1000:.0f}ms)")
+
+        with self._lock:
+            # Write to ring buffer (overwrite oldest if full)
+            end = self._write_pos + n
+            if end <= self._buf_size:
+                self._buffer[self._write_pos:end] = samples
+            else:
+                first = self._buf_size - self._write_pos
+                self._buffer[self._write_pos:] = samples[:first]
+                self._buffer[:n - first] = samples[first:]
+            self._write_pos = end % self._buf_size
+            self._samples_written += n
+
+    _FADE_SAMPLES = 80  # ~5ms fade-in at 16kHz to prevent click
+
+    def _audio_callback(self, outdata, frames, time_info, status):
+        """sounddevice callback: read from ring buffer into output."""
+        with self._lock:
+            available = (self._write_pos - self._read_pos) % self._buf_size
+            to_read = min(frames, available)
+
+            if to_read > 0:
+                end = self._read_pos + to_read
+                if end <= self._buf_size:
+                    outdata[:to_read, 0] = self._buffer[self._read_pos:end]
+                else:
+                    first = self._buf_size - self._read_pos
+                    outdata[:first, 0] = self._buffer[self._read_pos:]
+                    outdata[first:to_read, 0] = self._buffer[:to_read - first]
+                self._read_pos = (self._read_pos + to_read) % self._buf_size
+
+                # Fade-in on silence→audio transition to prevent click
+                if self._was_silent:
+                    fade = min(self._FADE_SAMPLES, to_read)
+                    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+                    outdata[:fade, 0] *= ramp
+                    self._was_silent = False
+            else:
+                self._was_silent = True
+
+            # Fill remainder with silence
+            if to_read < frames:
+                outdata[to_read:, 0] = 0.0
+
+    def stop(self):
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+
+
 class AudioStreamer:
     """Background thread: captures PCM16 audio from mic and queues for server.
 
@@ -246,9 +357,12 @@ async def run_client(url: str, target_fps: int, camera: int,
             cmd_input = CommandInput()
             cmd_input.start()
             audio_streamer = None
+            audio_player = None
             if whisper_enabled:
                 audio_streamer = AudioStreamer()
                 audio_streamer.start()
+                audio_player = AudioPlayer()
+                audio_player.start()
 
             # --- Dashboard (local display when --show) ---
             dashboard = None
@@ -295,6 +409,12 @@ async def run_client(url: str, target_fps: int, camera: int,
                 try:
                     async for raw in ws:
                         try:
+                            # Route audio responses to speaker
+                            if isinstance(raw, bytes) and len(raw) > 1 and raw[:1] == AUDIO_RESPONSE_PREFIX:
+                                if audio_player and audio_player.available:
+                                    audio_player.enqueue(raw[1:])
+                                continue
+
                             t_recv = time.perf_counter()
                             resp = pb.ServerMessage()
                             resp.ParseFromString(raw)
@@ -489,6 +609,8 @@ async def run_client(url: str, target_fps: int, camera: int,
                 cmd_input.stop()
                 if audio_streamer:
                     audio_streamer.stop()
+                if audio_player:
+                    audio_player.stop()
                 if dashboard:
                     dashboard.close()
 

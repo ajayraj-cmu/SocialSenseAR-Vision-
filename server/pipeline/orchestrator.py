@@ -83,7 +83,7 @@ class PipelineOrchestrator:
 
         if config.audio_enabled:
             if config.personaplex_enabled:
-                # --- PersonaPlex voice backend (replaces faster-whisper + wake word + Gemini planning) ---
+                # --- Hybrid: Whisper (commands) + PersonaPlex (voice responses) ---
                 from server.audio.personaplex_bridge import PersonaPlexBridge
                 from server.audio.personaplex_voice_agent import PersonaPlexVoiceAgent, PERSONAPLEX_SYSTEM_PROMPT
 
@@ -97,20 +97,30 @@ class PipelineOrchestrator:
                     audio_topk=config.personaplex_audio_topk,
                 )
 
-                # Create Gemini planner for typed text commands (PersonaPlex is speech-only)
+                # Gemini planner for command extraction
                 from server.audio.voice_agent import VoiceCommandPlanner
                 self._voice_planner = VoiceCommandPlanner(
                     api_key=config.gemini_api_key,
                     model=config.gemini_planning_model,
                 )
 
+                # Local Whisper transcriber for accurate user speech-to-text
+                from server.audio.local_transcriber import LocalTranscriber
+                self._transcriber = LocalTranscriber(
+                    listening_model=config.whisper_listening_model,
+                    recording_model=config.whisper_recording_model,
+                    beam_size=config.whisper_beam_size,
+                )
+                logger.info("Transcriber: local (faster-whisper) for PersonaPlex hybrid mode")
+
                 self._voice_agent = PersonaPlexVoiceAgent(
                     bridge=self._personaplex_bridge,
                     config=config,
                     planner=self._voice_planner,
+                    transcriber=self._transcriber,
                 )
                 self._voice_agent.set_on_command_callback(self._on_voice_command)
-                logger.info("Voice agent: PersonaPlex (speech-to-speech) + Gemini (typed commands)")
+                logger.info("Voice agent: hybrid (Whisper commands + PersonaPlex voice)")
             else:
                 # --- Standard voice backend (faster-whisper / OpenAI Whisper + Gemini planning) ---
                 from server.audio.voice_agent import VoiceAgent, VoiceCommandPlanner

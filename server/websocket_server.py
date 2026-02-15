@@ -593,25 +593,30 @@ class SocialSenseServer:
         from protobuf ServerMessage responses (which start with field tag 0x08+).
         """
         audio_chunks_sent = 0
+        total_bytes_sent = 0
+        poll_count = 0
         try:
             while True:
                 await asyncio.sleep(0.05)  # 50ms = 20 checks/sec
+                poll_count += 1
                 if self.pipeline is None:
                     continue
                 audio_data = self.pipeline.get_audio_response()
                 if audio_data:
                     audio_chunks_sent += 1
+                    total_bytes_sent += len(audio_data)
                     if audio_chunks_sent == 1:
                         logger.info(f"[Audio] Sending first audio response to client: {len(audio_data)}B")
                     elif audio_chunks_sent % 100 == 0:
-                        logger.info(f"[Audio] {audio_chunks_sent} audio response chunks sent to client")
+                        logger.info(f"[Audio] {audio_chunks_sent} chunks sent ({total_bytes_sent}B total)")
                     try:
                         await websocket.send(AUDIO_RESPONSE_PREFIX + audio_data)
                     except Exception:
                         break  # Connection closed
+                elif poll_count == 200:  # Log once after ~10s if no audio seen
+                    logger.info("[Audio] Response loop running but no audio received after 200 polls")
         except asyncio.CancelledError:
-            if audio_chunks_sent > 0:
-                logger.info(f"[Audio] Response loop ended: {audio_chunks_sent} chunks sent")
+            logger.info(f"[Audio] Response loop ended: {audio_chunks_sent} chunks, {total_bytes_sent}B sent")
 
     def _handle_control(self, msg: pb.ClientMessage):
         """Handle control commands from the client via Gemini NLP pipeline."""

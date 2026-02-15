@@ -172,7 +172,7 @@ class SocialSenseGPU:
         # Only override Modal-specific values (device, debug, API keys, metrics path).
         # PersonaPlex: ON by default when unified with SAM3 (same Modal container).
         # Set PERSONAPLEX_ENABLED=false to disable.
-        personaplex_env = os.getenv("PERSONAPLEX_ENABLED", "true").lower()
+        personaplex_env = os.getenv("PERSONAPLEX_ENABLED", "false").lower()
         personaplex_enabled = personaplex_env in ("true", "1", "yes")
         self.server_config = ServerConfig(
             device="cuda",
@@ -311,8 +311,42 @@ class SocialSenseGPU:
         async def health():
             return {"status": "healthy", "pipeline_loaded": self.pipeline is not None}
 
+        # Audio response prefix (same as websocket_server.py)
+        AUDIO_RESPONSE_PREFIX = b'\x01'
+
+        async def _audio_response_loop(ws: WebSocket, pipeline, remote: str):
+            """Send PersonaPlex audio responses to client as background task."""
+            import asyncio
+            chunks_sent = 0
+            total_bytes = 0
+            poll_count = 0
+            try:
+                while True:
+                    await asyncio.sleep(0.02)  # 20ms = 50 checks/sec
+                    poll_count += 1
+                    if pipeline is None:
+                        continue
+                    audio_data = pipeline.get_audio_response()
+                    if audio_data:
+                        chunks_sent += 1
+                        total_bytes += len(audio_data)
+                        if chunks_sent == 1:
+                            logger.info(f"[{remote}] Audio: first response chunk {len(audio_data)}B")
+                        elif chunks_sent % 100 == 0:
+                            logger.info(f"[{remote}] Audio: {chunks_sent} chunks, {total_bytes}B total")
+                        try:
+                            await ws.send_bytes(AUDIO_RESPONSE_PREFIX + audio_data)
+                        except Exception:
+                            break
+                    elif poll_count == 200:
+                        logger.info(f"[{remote}] Audio: response loop running, no audio after 200 polls")
+            except asyncio.CancelledError:
+                if chunks_sent > 0:
+                    logger.info(f"[{remote}] Audio: loop ended, {chunks_sent} chunks, {total_bytes}B sent")
+
         @web_app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
+            import asyncio
             await websocket.accept()
 
             remote = "unknown"
@@ -324,6 +358,19 @@ class SocialSenseGPU:
             audio_count = 0
             t_start = time.time()
             last_masks_fid = -1  # track masks_frame_id changes
+
+            # Start audio response sender (PersonaPlex → client)
+            audio_task = asyncio.create_task(
+                _audio_response_loop(websocket, self.pipeline, remote)
+            )
+
+            # Clear voice agent state for new session
+            if self.pipeline:
+                self.pipeline.clear_effects()
+                self.pipeline.set_active_prompts(set())
+                if hasattr(self.pipeline, '_voice_agent') and self.pipeline._voice_agent:
+                    self.pipeline._voice_agent.clear_all_effects()
+                logger.info(f"[{remote}] Cleared effects for new session")
 
             try:
                 while True:
@@ -482,6 +529,12 @@ class SocialSenseGPU:
                 try:
                     await websocket.close()
                 except Exception:
+                    pass
+            finally:
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except asyncio.CancelledError:
                     pass
 
         return web_app

@@ -107,10 +107,10 @@ class ServerConfig:
     personaplex_enabled: bool = False  # Off by default; enable to use PersonaPlex instead of faster-whisper
     personaplex_url: str = "ws://localhost:8998/api/chat"  # Override with Modal URL or remote host
     personaplex_voice_prompt: str = "NATF0.pt"
-    personaplex_text_temperature: float = 0.7
-    personaplex_text_topk: int = 25
-    personaplex_audio_temperature: float = 0.8
-    personaplex_audio_topk: int = 250
+    personaplex_text_temperature: float = 0.3  # Low temp = less creative/chatty
+    personaplex_text_topk: int = 10           # Narrow sampling = more predictable
+    personaplex_audio_temperature: float = 0.6  # Slightly lower for less variation
+    personaplex_audio_topk: int = 150         # Narrower audio sampling
 
     # Debug
     debug_view: bool = False  # Show Quest camera feed + overlays in cv2 window
