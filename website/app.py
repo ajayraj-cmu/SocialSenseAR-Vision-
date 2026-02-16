@@ -223,7 +223,7 @@ def download_unity():
         return "No endpoint yet — deploy first.", 400
     zip_path = generate_unity_client(ws_endpoint)
     return send_file(zip_path, as_attachment=True,
-                     download_name="XRBridge-Unity-Client.zip",
+                     download_name="SocialSenseAR-Unity-Client.zip",
                      mimetype="application/zip")
 
 

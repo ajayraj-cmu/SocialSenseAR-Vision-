@@ -71,22 +71,26 @@ def generate_unity_client(ws_endpoint: str) -> Path:
         else:
             print(f"[unity_generator] WARNING: SocialSenseClient.cs not found at {client_script}")
 
-        # Write a README into the zip root
+        # Write START_HERE and endpoint README into the zip root
+        start_here = dest / "START_HERE.txt"
+        start_here.write_text(
+            f"SocialSenseAR Unity Client — START HERE\n"
+            f"=========================================\n\n"
+            f"SCENE TO PLAY:  Assets/final.unity  (the only scene you need)\n\n"
+            f"Quick Start:\n"
+            f"1. Extract this zip to your desired location\n"
+            f"2. Double-click OpenInUnity.command (Mac) or OpenInUnity.bat (Windows)\n"
+            f"3. In Unity, open Assets/final.unity if not already open\n"
+            f"4. Press Play — defaults to Webcam mode\n\n"
+            f"To switch to AR (Quest headset): Select SocialSenseClient, set Input Mode to 'AR'\n\n"
+            f"WebSocket endpoint (pre-configured): {ws_endpoint}\n"
+        )
+        # Keep ENDPOINT_README for technical reference
         readme = dest / "ENDPOINT_README.txt"
         readme.write_text(
-            f"SocialSenseAR Unity Client\n"
-            f"==========================\n\n"
             f"WebSocket Endpoint: {ws_endpoint}\n\n"
-            f"Quick Start:\n"
-            f"1. Extract this zip to your desired location (e.g. Desktop, Documents)\n"
-            f"2. Double-click OpenInUnity.command (Mac) or OpenInUnity.bat (Windows)\n"
-            f"   to open the project in Unity and load the final scene.\n"
-            f"3. Press Play — defaults to Webcam mode\n"
-            f"4. To switch to AR headset mode:\n"
-            f"   Select the SocialSenseClient GameObject in the scene,\n"
-            f"   change Input Mode to 'AR' in the Inspector.\n\n"
-            f"The serverUrl field in SocialSenseClient.cs has been pre-filled:\n"
-            f"  {ws_endpoint}\n"
+            f"Scene: Assets/final.unity\n"
+            f"Default input: Webcam (toggle to AR in Inspector)\n"
         )
 
         # OpenInUnity script (macOS) — opens project in Unity, loads final scene
