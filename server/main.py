@@ -40,8 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-audio", action="store_true", help="Disable audio pipeline")
     parser.add_argument("--no-emotion", action="store_true", help="Disable emotion detection")
     parser.add_argument("--pipeline", default="sam3",
-                        choices=["sam3", "grounded-sam2", "legacy"],
-                        help="Pipeline mode: sam3 (default), grounded-sam2, or legacy")
+                        choices=["sam3", "grounded-sam2", "legacy", "yolo"],
+                        help="Pipeline mode: sam3 (default), grounded-sam2, legacy, or yolo")
     parser.add_argument("--legacy", action="store_true",
                         help="Shorthand for --pipeline legacy")
     parser.add_argument("--stub", action="store_true",

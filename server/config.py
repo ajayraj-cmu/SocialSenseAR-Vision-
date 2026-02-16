@@ -1,7 +1,7 @@
 """Server configuration — single source of truth for all runtime defaults."""
 import os
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 # Valid effect types (used by voice agent, dashboard, websocket server)
 EFFECT_TYPES = ("blur", "dim", "pixelate", "highlight", "outline", "color")
@@ -28,6 +28,29 @@ class ServerConfig:
 
     # Pipeline mode: "sam3" (default), "grounded-sam2", or "legacy"
     pipeline_mode: str = "sam3"
+
+    # ── Multi-model CV pipeline (Phase 3) ────────────────────────────────────
+    # List of CV model IDs to activate. Supported IDs:
+    #   sam3, grounded-sam2, yolo, yolo-pose, mediapipe,
+    #   rf-detr, depth-anything, sapiens
+    # GitHub links for each in server/vision/registry.py
+    active_models: List[str] = field(default_factory=lambda: ["sam3"])
+    primary_model: str = "sam3"   # model that drives segments[] for voice/effects
+
+    # Path to cv_models.yaml (per-model configs). None = use defaults.
+    cv_models_config: Optional[str] = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config", "cv_models.yaml",
+    )
+
+    # Supplementary model frame rate limits (model_id → max FPS)
+    # Supplementary models run at reduced FPS to save GPU memory.
+    supplementary_fps: dict = field(default_factory=lambda: {
+        "mediapipe": 15,
+        "depth-anything": 5,
+        "yolo-pose": 15,
+        "sapiens": 5,
+    })
 
     # Grounded SAM2 (GroundingDINO detection + SAM2 masks — no API keys needed)
     gdino_model: str = "IDEA-Research/grounding-dino-tiny"

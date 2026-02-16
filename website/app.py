@@ -261,8 +261,20 @@ def run_deploy(state: dict):
             log(f"Branch: {state['github_ref']}")
 
         env = os.environ.copy()
-        env["MODAL_TOKEN_ID"] = state["modal_token_id"]
-        env["MODAL_TOKEN_SECRET"] = state["modal_token_secret"]
+        # Only inject token env vars if the stored secret looks like a real
+        # Modal token secret (starts with "as-"), not a secret name like
+        # "socialsense-secrets". If Modal is already authenticated via the
+        # local credentials file (~/.modal/credentials.toml), skip injection
+        # and let Modal use those credentials automatically.
+        tid = state.get("modal_token_id", "").strip()
+        tsec = state.get("modal_token_secret", "").strip()
+        if tid and tsec and tsec.startswith("as-"):
+            env["MODAL_TOKEN_ID"] = tid
+            env["MODAL_TOKEN_SECRET"] = tsec
+        else:
+            # Remove any stale/wrong token env vars so local credentials are used
+            env.pop("MODAL_TOKEN_ID", None)
+            env.pop("MODAL_TOKEN_SECRET", None)
 
         # Clone repo (repo_url already parsed/cleaned above)
         workspace = Path(__file__).parent / "workspace"
@@ -353,7 +365,19 @@ def run_deploy(state: dict):
         )
         ws_endpoint = _extract_endpoint(r2.stdout + r2.stderr)
         if not ws_endpoint:
-            ws_endpoint = f"wss://{state['modal_token_id']}--cv-model-deploy-cvmodeldeploy-web.modal.run/ws"
+            # Try to get workspace name from modal profile list
+            try:
+                wp_result = subprocess.run(
+                    [sys.executable, "-m", "modal", "profile", "list"],
+                    capture_output=True, text=True, env=env, timeout=15
+                )
+                import re as _re2
+                # Active profile line has bullet (•)
+                m = _re2.search(r'[•\*]\s+\S+\s+(\S+)', wp_result.stdout + wp_result.stderr)
+                workspace_name = m.group(1) if m else state.get("modal_token_id", "ajraj2006")
+            except Exception:
+                workspace_name = state.get("modal_token_id", "ajraj2006")
+            ws_endpoint = f"wss://{workspace_name}--cv-model-deploy-cvmodeldeploy-web.modal.run/ws"
             log(f"Endpoint (pattern): {ws_endpoint}")
         else:
             log(f"Endpoint: {ws_endpoint}")

@@ -39,4 +39,33 @@ sphn>=0.1.4,<0.2
 aiohttp>=3.9.0
 
 # MediaPipe (body detection)
+# GitHub: https://github.com/google-ai-edge/mediapipe
 mediapipe>=0.10.0
+
+# ── CV Model Generalization (Phase 1-3) ──────────────────────────────────────
+# Install only the models you need — each is optional.
+
+# YOLO (detection, segmentation, pose)
+# GitHub: https://github.com/ultralytics/ultralytics
+# Install: pip install ultralytics
+# ultralytics>=8.0.0
+
+# RF-DETR (real-time transformer detection)
+# GitHub: https://github.com/roboflow/rf-detr
+# Install: pip install rfdetr
+# rfdetr>=0.1.0
+
+# Depth Anything V2 (monocular depth estimation)
+# GitHub: https://github.com/LiheYoung/Depth-Anything-V2
+# HuggingFace: depth-anything/Depth-Anything-V2-Small-hf
+# Uses 'transformers' pipeline (already required above)
+# timm>=0.9.0  # needed for some Depth Anything variants
+
+# Sapiens (Meta — pose, segmentation, depth)
+# GitHub: https://github.com/facebookresearch/sapiens
+# HuggingFace: facebook/sapiens-pose-0.3b
+# Uses 'transformers' AutoModel (already required above)
+# License: Apache 2.0 — check https://github.com/facebookresearch/sapiens/blob/main/LICENSE
+
+# PyYAML (for reading config/cv_models.yaml)
+PyYAML>=6.0

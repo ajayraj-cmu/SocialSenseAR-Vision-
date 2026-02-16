@@ -58,6 +58,43 @@ message ServerMessage {
 
   // Server performance metrics
   PerformanceMetrics metrics = 30;
+
+  // Phase 2: keypoint overlays (pose, hands, face landmarks)
+  repeated KeypointOverlay keypoints = 40;
+
+  // Phase 2: depth map overlay (depth colormap JPEG)
+  DepthOverlay depth = 41;
+}
+
+// ============================================================
+// PHASE 2: KEYPOINTS & DEPTH
+// ============================================================
+
+message KeypointOverlay {
+  string model_id = 1;                  // "mediapipe_pose", "yolo_pose", "sapiens"
+  repeated KeypointGroup groups = 2;
+}
+
+message KeypointGroup {
+  string label = 1;                     // "body", "face", "left_hand", "right_hand"
+  repeated Keypoint points = 2;
+  repeated int32 skeleton_edges = 3;    // flat pairs of indices into points[]
+}
+
+message Keypoint {
+  float x = 1;                          // normalized 0-1
+  float y = 2;                          // normalized 0-1
+  float visibility = 3;                 // 0-1
+  string name = 4;                      // "nose", "left_shoulder", etc.
+}
+
+message DepthOverlay {
+  string model_id = 1;                  // "depth-anything", "sapiens"
+  bytes depth_rgb = 2;                  // JPEG-encoded colormap (RGB)
+  int32 width = 3;
+  int32 height = 4;
+  float near_m = 5;                     // nearest depth value (raw units)
+  float far_m = 6;                      // farthest depth value (raw units)
 }
 
 message SceneSegment {

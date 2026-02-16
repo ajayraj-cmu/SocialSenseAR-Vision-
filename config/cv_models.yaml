@@ -1,0 +1,76 @@
+# CV Model Configuration
+# Controls which models are active and their per-model settings.
+#
+# active_models: list of model IDs to load at startup
+# primary_model: model that produces segments[] for effect/voice commands
+#
+# GitHub sources:
+#   YOLO:           https://github.com/ultralytics/ultralytics
+#   SAM3:           https://github.com/facebookresearch/sam3
+#   Grounded SAM2:  https://github.com/IDEA-Research/Grounded-SAM-2
+#   MediaPipe:      https://github.com/google-ai-edge/mediapipe
+#   RF-DETR:        https://github.com/roboflow/rf-detr
+#   Depth Anything: https://github.com/LiheYoung/Depth-Anything-V2
+#   Sapiens:        https://github.com/facebookresearch/sapiens
+
+# ─── Active model selection ──────────────────────────────────────────────────
+
+active_models:
+  - sam3          # primary segmentation (text-prompted, requires HF_SAM_TOKEN)
+  # - grounded-sam2  # alternative primary (no API keys, GroundingDINO+SAM2)
+  # - yolo           # YOLO detection/segmentation (pip install ultralytics)
+  # - yolo-pose      # YOLO pose estimation
+  # - mediapipe      # MediaPipe pose/hands/face
+  # - rf-detr        # RF-DETR detection (pip install rfdetr)
+  # - depth-anything # Monocular depth (pip install transformers)
+  # - sapiens        # Meta Sapiens pose/seg/depth (HF: facebook/sapiens-*)
+
+primary_model: sam3   # Which model drives segments[] for voice effects
+
+# ─── Per-model settings ──────────────────────────────────────────────────────
+
+yolo:
+  model_variant: yolov8n-seg.pt   # auto-downloaded; change to yolov8n.pt for detection only
+  confidence: 0.35
+  iou: 0.45
+  device: cuda
+  output_type: segmentation       # segmentation | detection
+
+yolo-pose:
+  model_variant: yolov8n-pose.pt
+  confidence: 0.35
+  iou: 0.45
+  device: cuda
+
+mediapipe:
+  tasks:
+    - pose
+    # - hands
+    # - face
+  pose_complexity: 1              # 0=lite, 1=full, 2=heavy
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+
+rf-detr:
+  model_variant: rfdetr_base      # rfdetr_base | rfdetr_large
+  confidence: 0.35
+  device: cuda
+
+depth-anything:
+  model_variant: small            # small | base | large
+  device: cuda
+  max_dim: 518                    # resize input before inference
+
+sapiens:
+  task: pose                      # pose | seg | depth
+  model_size: "0.3b"              # 0.3b | 0.6b | 1b | 2b
+  device: cuda
+
+# ─── Supplementary model FPS limits ─────────────────────────────────────────
+# Supplementary models (non-primary) can run at reduced FPS to save GPU memory.
+
+supplementary_fps:
+  mediapipe: 15
+  depth-anything: 5
+  yolo-pose: 15
+  sapiens: 5

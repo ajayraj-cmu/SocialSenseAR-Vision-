@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 class PipelineResult:
     """Return value of process_frame()."""
     __slots__ = ("segments", "fastsam_ms", "gemini_ms", "total_ms",
-                 "masks_frame_id", "decoder_skipped")
+                 "masks_frame_id", "decoder_skipped",
+                 "keypoints", "depth")
 
     def __init__(self):
         self.segments: list[SegmentData] = []
@@ -44,6 +45,9 @@ class PipelineResult:
         self.total_ms: float = 0
         self.masks_frame_id: int = 0  # frame_id when SAM decoder last ran
         self.decoder_skipped: bool = False  # True when SAM returned cached masks
+        # Phase 2: supplementary model outputs
+        self.keypoints: list = []    # list of KeypointOverlay proto dicts
+        self.depth: dict | None = None  # DepthOverlay proto dict or None
 
 
 class PipelineOrchestrator:
@@ -67,12 +71,49 @@ class PipelineOrchestrator:
             self._segmenter = SAM3Segmenter(config)
             self._labeler = None  # SAM3 text prompts ARE labels
             logger.info("Pipeline mode: SAM3 (text-prompted, no Gemini)")
+        elif config.pipeline_mode == "yolo":
+            from server.vision.yolo_pipeline import YOLOPipeline
+            self._segmenter = YOLOPipeline(config)
+            self._labeler = None
+            logger.info("Pipeline mode: YOLO (ultralytics, no HF token needed)")
         else:
             from server.vision.fastsam_segmenter import FastSAMSegmenter
             from server.vision.gemini_labeler import GeminiLabeler
             self._segmenter = FastSAMSegmenter(config)
             self._labeler = GeminiLabeler(config)
             logger.info("Pipeline mode: Legacy (FastSAM + MediaPipe + Gemini)")
+
+        # ── Multi-model supplementary pipeline (Phase 3) ─────────────────────
+        # Supplementary models run alongside the primary segmenter.
+        # They produce keypoints[] and/or depth for Unity renderers.
+        self._supplementary_models: dict = {}   # {model_id: CVModelBase instance}
+        self._supplementary_last_run: dict = {} # {model_id: float timestamp}
+        self._last_keypoints: list = []          # cached KeypointOverlay proto dicts
+        self._last_depth: dict | None = None     # cached DepthOverlay proto dict
+
+        _primary_id = getattr(config, "primary_model", config.pipeline_mode)
+        _active = getattr(config, "active_models", [config.pipeline_mode])
+        _supp_ids = [m for m in _active if m != _primary_id and m not in
+                     ("sam3", "grounded-sam2", "legacy")]
+
+        if _supp_ids:
+            from server.vision.registry import load_model
+            from server.vision.adapters import KeypointsAdapter, DepthAdapter, DetectionAdapter
+            self._kp_adapter = KeypointsAdapter()
+            self._depth_adapter = DepthAdapter()
+            self._det_adapter = DetectionAdapter()
+            for mid in _supp_ids:
+                try:
+                    inst = load_model(mid, config)
+                    self._supplementary_models[mid] = inst
+                    self._supplementary_last_run[mid] = 0.0
+                    logger.info("Supplementary model loaded: %s", mid)
+                except Exception as exc:
+                    logger.warning("Could not load supplementary model '%s': %s", mid, exc)
+        else:
+            self._kp_adapter = None
+            self._depth_adapter = None
+            self._det_adapter = None
 
         # Audio / Voice Agent components
         self._voice_agent = None
@@ -533,8 +574,64 @@ class PipelineOrchestrator:
         result.masks_frame_id = self._cached_result.masks_frame_id
         result.fastsam_ms = 0
         result.gemini_ms = 0
+
+        # Run supplementary models (rate-limited per supplementary_fps config)
+        if self._supplementary_models:
+            self._run_supplementary(frame_bgr, fw, fh)
+        result.keypoints = list(self._last_keypoints)
+        result.depth = self._last_depth
+
         result.total_ms = (time.perf_counter() - t0) * 1000
         return result
+
+    # ------------------------------------------------------------------
+    # Supplementary model runner (Phase 3)
+    # ------------------------------------------------------------------
+
+    def _run_supplementary(self, frame_bgr, fw: int, fh: int) -> None:
+        """Run supplementary CV models on the current frame (rate-limited).
+
+        Updates self._last_keypoints and self._last_depth in-place.
+        Each model respects its FPS limit from config.supplementary_fps.
+        """
+        now = time.perf_counter()
+        supp_fps: dict = getattr(self.config, "supplementary_fps", {})
+        new_keypoints = []
+        new_depth = None
+
+        for model_id, model in self._supplementary_models.items():
+            max_fps = supp_fps.get(model_id, 15)
+            min_interval = 1.0 / max_fps if max_fps > 0 else 0.0
+            last_run = self._supplementary_last_run.get(model_id, 0.0)
+            if now - last_run < min_interval:
+                continue  # rate-limit: skip this frame
+
+            try:
+                raw = model.process(frame_bgr)
+                self._supplementary_last_run[model_id] = now
+
+                if raw.output_type == "keypoints" and self._kp_adapter:
+                    _, kp_groups = self._kp_adapter.convert(raw, (fh, fw))
+                    new_keypoints.extend(kp_groups)
+
+                elif raw.output_type == "depth" and self._depth_adapter:
+                    depth_dict = self._depth_adapter.convert(raw, (fh, fw))
+                    if depth_dict is not None:
+                        new_depth = depth_dict
+
+                elif raw.output_type in ("detection", "segmentation") and self._det_adapter:
+                    # Supplementary detection/seg: add to keypoints list as bbox segments
+                    # (primary model owns segments[], so we skip adding here to avoid conflicts)
+                    pass
+
+            except Exception as exc:
+                logger.warning("Supplementary model '%s' error: %s", model_id, exc)
+
+        # Update cached overlays (keep previous if no new data this frame)
+        if new_keypoints:
+            self._last_keypoints = new_keypoints
+        if new_depth is not None:
+            self._last_depth = new_depth
 
     # ------------------------------------------------------------------
     # Synchronous SAM (first frame only)

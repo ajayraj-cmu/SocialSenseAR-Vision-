@@ -249,6 +249,31 @@ class SocialSenseServer:
                 if color_hex:
                     response.conversation.voice_agent.full_screen_filter.color_hex = color_hex
 
+        # Phase 2: keypoint overlays from supplementary models
+        for kp_group_set in getattr(result, 'keypoints', []):
+            kp_overlay = response.keypoints.add()
+            kp_overlay.model_id = kp_group_set.get("model_id", "")
+            for grp in kp_group_set.get("groups", []):
+                proto_grp = kp_overlay.groups.add()
+                proto_grp.label = grp.get("label", "")
+                for pt in grp.get("points", []):
+                    proto_pt = proto_grp.points.add()
+                    proto_pt.x = pt.get("x", 0.0)
+                    proto_pt.y = pt.get("y", 0.0)
+                    proto_pt.visibility = pt.get("visibility", 1.0)
+                    proto_pt.name = pt.get("name", "")
+                proto_grp.skeleton_edges.extend(grp.get("skeleton_edges", []))
+
+        # Phase 2: depth overlay from supplementary models
+        depth_data = getattr(result, 'depth', None)
+        if depth_data is not None:
+            response.depth.model_id = depth_data.get("model_id", "")
+            response.depth.depth_rgb = depth_data.get("depth_rgb", b"")
+            response.depth.width = depth_data.get("width", 0)
+            response.depth.height = depth_data.get("height", 0)
+            response.depth.near_m = depth_data.get("near_m", 0.0)
+            response.depth.far_m = depth_data.get("far_m", 0.0)
+
         # Metrics — report honest wall-clock time
         proto_ms = (time.perf_counter() - t0) * 1000
         wall_ms = (time.perf_counter() - t_wall) * 1000
