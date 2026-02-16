@@ -78,13 +78,78 @@ def generate_unity_client(ws_endpoint: str) -> Path:
             f"==========================\n\n"
             f"WebSocket Endpoint: {ws_endpoint}\n\n"
             f"Quick Start:\n"
-            f"1. Open this folder in Unity (Unity 6 recommended)\n"
-            f"2. Press Play — defaults to Webcam mode\n"
-            f"3. To switch to AR headset mode:\n"
+            f"1. Extract this zip to your desired location (e.g. Desktop, Documents)\n"
+            f"2. Double-click OpenInUnity.command (Mac) or OpenInUnity.bat (Windows)\n"
+            f"   to open the project in Unity and load the final scene.\n"
+            f"3. Press Play — defaults to Webcam mode\n"
+            f"4. To switch to AR headset mode:\n"
             f"   Select the SocialSenseClient GameObject in the scene,\n"
             f"   change Input Mode to 'AR' in the Inspector.\n\n"
             f"The serverUrl field in SocialSenseClient.cs has been pre-filled:\n"
             f"  {ws_endpoint}\n"
+        )
+
+        # OpenInUnity script (macOS) — opens project in Unity, loads final scene
+        open_mac = dest / "OpenInUnity.command"
+        open_mac.write_text(
+            "#!/bin/bash\n"
+            'cd "$(dirname "$0")"\n'
+            '# Try Unity app first, then Unity Hub\n'
+            'if open -a "Unity" . 2>/dev/null; then\n'
+            '  echo "Opening in Unity..."\n'
+            'elif open -a "Unity Hub" . 2>/dev/null; then\n'
+            '  echo "Opening in Unity Hub..."\n'
+            'else\n'
+            '  echo "Unity not found. Please install Unity and open this folder manually."\n'
+            '  echo "Project path: $(pwd)"\n'
+            '  open .\n'
+            'fi\n',
+            encoding="utf-8",
+        )
+        open_mac.chmod(0o755)
+
+        # Editor script to open final scene when project loads
+        editor_dir = dest / "Assets" / "Editor"
+        editor_dir.mkdir(exist_ok=True)
+        open_scene_script = editor_dir / "OpenFinalSceneOnLoad.cs"
+        open_scene_script.write_text(
+            "// Auto-generated: opens final scene when project loads (first open).\n"
+            "#if UNITY_EDITOR\n"
+            "using UnityEditor;\n"
+            "using UnityEditor.SceneManagement;\n"
+            "\n"
+            "static class OpenFinalSceneOnLoad {\n"
+            "    [InitializeOnLoadMethod]\n"
+            "    static void OnLoad() {\n"
+            "        EditorApplication.delayCall += () => {\n"
+            "            var active = EditorSceneManager.GetActiveScene();\n"
+            "            if (string.IsNullOrEmpty(active.path))\n"
+            "                EditorSceneManager.OpenScene(\"Assets/final.unity\");\n"
+            "        };\n"
+            "    }\n"
+            "}\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+
+        # OpenInUnity script (Windows)
+        open_win = dest / "OpenInUnity.bat"
+        open_win.write_text(
+            '@echo off\n'
+            'cd /d "%~dp0"\n'
+            'set "UNITY="\n'
+            'for /d %%D in ("C:\\Program Files\\Unity\\Hub\\Editor\\*") do set "UNITY=%%D\\Editor\\Unity.exe"\n'
+            'if not exist "%UNITY%" set "UNITY=C:\\Program Files\\Unity\\Editor\\Unity.exe"\n'
+            'if exist "%UNITY%" (\n'
+            '  start "" "%UNITY%" -projectPath "%CD%"\n'
+            '  echo Opening in Unity...\n'
+            ') else (\n'
+            '  echo Unity not found. Please install Unity and open this folder manually.\n'
+            '  echo Project path: %CD%\n'
+            '  explorer .\n'
+            ')\n'
+            'pause\n',
+            encoding="utf-8",
         )
 
         # Zip the dest folder

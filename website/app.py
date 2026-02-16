@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -172,6 +173,39 @@ def api_reset():
     state["unity_ready"] = False
     save_state(state)
     return jsonify({"ok": True})
+
+
+@app.route("/api/terminate_deployment", methods=["POST"])
+def api_terminate_deployment():
+    """Stop the Modal app deployment and reset local state."""
+    state = load_state()
+    if state.get("deploy_status") == "deploying":
+        return jsonify({"ok": False, "error": "Cannot terminate while deployment is in progress."})
+
+    env = os.environ.copy()
+    tid = state.get("modal_token_id", "").strip()
+    tsec = state.get("modal_token_secret", "").strip()
+    if tid and tsec and tsec.startswith("as-"):
+        env["MODAL_TOKEN_ID"] = tid
+        env["MODAL_TOKEN_SECRET"] = tsec
+    else:
+        env.pop("MODAL_TOKEN_ID", None)
+        env.pop("MODAL_TOKEN_SECRET", None)
+
+    r = subprocess.run(
+        [sys.executable, "-m", "modal", "app", "stop", "cv-model-deploy"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    # modal app stop returns 0 on success; app may not exist (already stopped)
+    stopped = r.returncode == 0 or "not found" in (r.stderr + r.stdout).lower()
+
+    state["deploy_status"] = "idle"
+    state["deploy_log"] = state.get("deploy_log", "") + "\n[Terminated by user]"
+    state["ws_endpoint"] = ""
+    state["unity_ready"] = False
+    save_state(state)
+
+    return jsonify({"ok": True, "stopped": stopped})
 
 
 @app.route("/api/history")

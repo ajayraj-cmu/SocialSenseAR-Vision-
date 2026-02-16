@@ -192,6 +192,10 @@
       </button>
       <button class="btn btn-ghost {{ 'hidden' if state.deploy_status == 'idle' }}" id="resetBtn"
               onclick="resetDeploy()" style="font-size: 12px;">Reset</button>
+      <button class="btn btn-danger {{ 'hidden' if state.deploy_status != 'done' }}" id="terminateBtn"
+              onclick="terminateDeployment()" style="font-size: 12px;" title="Stop Modal deployment and free resources">
+        Terminate
+      </button>
     </div>
   </div>
 
@@ -236,7 +240,7 @@
       <h4>Unity Client Ready</h4>
       <p>Pre-configured with your deployed WebSocket endpoint</p>
     </div>
-    <a href="/download_unity">
+    <a href="/download_unity" download="SocialSenseAR-Unity-Client.zip">
       <button class="btn btn-success">
         <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
         Download .zip
@@ -372,6 +376,8 @@
       btn.innerHTML = '<svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Redeploy';
     }
     reset.classList.toggle('hidden', data.deploy_status === 'idle');
+    const terminateBtn = document.getElementById('terminateBtn');
+    if (terminateBtn) terminateBtn.classList.toggle('hidden', data.deploy_status !== 'done');
 
     if (data.ws_endpoint) {
       epUrl.textContent = data.ws_endpoint;
@@ -416,5 +422,20 @@
   async function resetDeploy() {
     await fetch('/api/reset', { method: 'POST' });
     location.reload();
+  }
+
+  async function terminateDeployment() {
+    const btn = document.getElementById('terminateBtn');
+    if (btn) btn.disabled = true;
+    const res = await fetch('/api/terminate_deployment', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      applyStatus({ deploy_status: 'idle', ws_endpoint: '', unity_ready: false, deploy_log: '' });
+      if (btn) btn.disabled = false;
+      location.reload();
+    } else {
+      alert(data.error || 'Failed to terminate deployment.');
+      if (btn) btn.disabled = false;
+    }
   }
 {% endblock %}
