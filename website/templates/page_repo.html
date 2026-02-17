@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Step 1 — Repo &amp; Secrets</title>
+  <style>
+    body { font-family: monospace; max-width: 720px; margin: 40px auto; padding: 0 20px; background: #0d0d0d; color: #e0e0e0; }
+    h1 { color: #00d4ff; }
+    h2 { color: #aaa; font-size: 1em; font-weight: normal; margin-top: 0; }
+    label { display: block; margin-top: 20px; color: #888; font-size: 0.85em; }
+    input[type=text], textarea {
+      display: block; width: 100%; box-sizing: border-box;
+      background: #1a1a1a; color: #e0e0e0; border: 1px solid #333;
+      padding: 10px; font-family: monospace; font-size: 0.9em; margin-top: 6px;
+    }
+    textarea { height: 200px; resize: vertical; }
+    button {
+      margin-top: 30px; padding: 12px 30px; background: #00d4ff; color: #000;
+      border: none; font-size: 1em; font-family: monospace; cursor: pointer;
+    }
+    button:hover { background: #00b8d9; }
+    .hint { color: #555; font-size: 0.78em; margin-top: 4px; }
+    nav { margin-bottom: 30px; color: #444; }
+    nav span { color: #00d4ff; }
+  </style>
+</head>
+<body>
+  <nav>Step <span>1</span> of 2 — Repo &amp; Secrets &nbsp;|&nbsp; <a href="/modal" style="color:#555">Step 2: Deploy →</a></nav>
+  <h1>AR CV Model Deployer</h1>
+  <h2>Paste your public GitHub repo and any required API keys.</h2>
+
+  <form method="POST">
+    <label>GitHub Repo URL (public)</label>
+    <input type="text" name="github_repo_url"
+           value="{{ state.github_repo_url }}"
+           placeholder="https://github.com/yourname/your-cv-model"
+           required>
+    <div class="hint">Must be a public repo. The root should contain your CV model entry point.</div>
+
+    <label>API Keys / Tokens / Env Vars</label>
+    <textarea name="env_vars"
+              placeholder="OPENAI_API_KEY=sk-...&#10;GEMINI_API_KEY=AIza...&#10;HF_SAM_TOKEN=hf_...&#10;HF_TOKEN=hf_...&#10;MY_CUSTOM_VAR=value">{{ env_text }}</textarea>
+    <div class="hint">
+      One per line, format: KEY=VALUE. These are written to a .env file inside the
+      deployed Modal container and passed as environment variables to your model.
+      <br><br>
+      Required for the SAM3 pipeline: OPENAI_API_KEY, GEMINI_API_KEY (or GOOGLE_API_KEY), HF_SAM_TOKEN (or HF_TOKEN).
+    </div>
+
+    <button type="submit">Save &amp; Continue →</button>
+  </form>
+</body>
+</html>

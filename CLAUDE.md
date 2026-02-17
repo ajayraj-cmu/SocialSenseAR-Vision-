@@ -83,6 +83,72 @@ python tools/webcam_modal_client.py --url wss://<your-modal-url>/ws --show
 
 Modal deployment requires a Modal secret named `socialsense-secrets` containing all required API keys.
 
+### Story Rendering Pipeline (Video → Masks → Rendered Output)
+
+Two-step pipeline for processing videos with SAM3 segmentation and rendering effects.
+
+**Step 1: Process video** (get SAM3 masks via server)
+
+```bash
+# Via Modal cloud GPU (recommended)
+python -u -m tools.video_processor \
+    --input story/my_video.mp4 \
+    --output story/ \
+    --server-url wss://<your-modal-url>/ws \
+    --transcribe-audio \
+    --progress
+
+# Via local server (must be running on port 8765)
+python -u -m tools.video_processor \
+    --input story/my_video.mp4 \
+    --output story/ \
+    --server-url ws://localhost:8765 \
+    --transcribe-audio \
+    --progress
+
+# Locally without server (requires CUDA GPU)
+python -u -m tools.video_processor \
+    --input story/my_video.mp4 \
+    --output story/ \
+    --local --device cuda \
+    --prompts "person,laptop" \
+    --progress
+```
+
+This produces `story.json` + `masks.bin` in the output directory. With `--transcribe-audio`, voice commands in the video are detected and added to the effects timeline.
+
+**Step 2: Render with effects** (Python preview/export)
+
+```bash
+python -u -m tools.story_renderer \
+    --story story/ \
+    --output story/rendered.mp4 \
+    --mode all
+```
+
+Modes: `outline` (mask outlines only), `filled` (solid color fills), `effects` (voice-commanded effects only), `all` (outlines + effects).
+
+**Step 3: Copy to Unity for demo playback**
+
+```bash
+# Copy story files to Unity StreamingAssets
+cp story/story.json unity-client/Assets/StreamingAssets/story_dir/
+cp story/masks.bin unity-client/Assets/StreamingAssets/story_dir/
+cp story/my_video.mp4 unity-client/Assets/StreamingAssets/story_dir/
+```
+
+The video filename must match the `source_video` field in `story.json` metadata (set automatically during processing).
+
+**Step 4: Play in Unity**
+
+1. Open `unity-client/` in Unity Editor
+2. Menu: `SocialSense → Create Demo Playback Scene` (creates `Assets/DemoPlayback.unity`)
+3. Set Game view to 1080x1920 (portrait)
+4. Press Play — video plays with SAM3 mask overlays and voice-commanded effects
+5. Press `R` to toggle frame capture (exports to `demo_frames/` via ffmpeg)
+
+StoryPlayback reads the video filename from `story.json` metadata automatically.
+
 ### Dashboard
 
 The dashboard is automatically available when the server runs:
@@ -124,12 +190,32 @@ Quest 3 (Unity)                     GPU Server (Python)
 
 **Config**: `server/config.py` - `ServerConfig` dataclass is the single source of truth for all tunables (SAM resolution, confidence thresholds, tracking params, RLE scaling, effect settings, etc.)
 
-### Unity Client (`unity-client/Assets/Scripts/`)
+### Unity Client — Submodule (`unity-client/`)
 
-- **SocialSenseClient.cs** - Camera capture, Y-flip blit, async GPU readback, JPEG encode, WebSocket send, stores pose per frame_id
-- **OverlayRenderer.cs** - RLE decode (with Y-flip), composite RGBA32 texture, sphere geometry, inverse-pinhole label placement
+**`unity-client/` is a git submodule** pointing to `https://github.com/inuvation/SocialSenseAR-Unity.git`. **NEVER edit files inside the submodule checkout** (`unity-client/`). The real Unity repo lives at `/Users/marshallmandell/Documents/GitHub/SocialSenseAR-Unity` — always make changes there, commit, push, then update the submodule:
+
+```bash
+# 1. Edit files in the REAL Unity repo (NOT unity-client/)
+cd /Users/marshallmandell/Documents/GitHub/SocialSenseAR-Unity
+# ... make changes ...
+git add -A && git commit -m "your message"
+git push
+
+# 2. Update the submodule to match
+cd /Users/marshallmandell/Documents/GitHub/SocialSenseAR-Vision-
+cd unity-client && git fetch origin && git checkout origin/master
+cd .. && git add unity-client && git commit -m "unity-client: update submodule"
+```
+
+**Key scripts** (`unity-client/Assets/Scripts/`):
+- **SocialSenseClient.cs** - Main coordinator (delegates to Client/ helpers)
+- **Client/** - WebSocketManager, FrameCapture, ClientHUD
+- **Core/** - Shared: RleDecoder, MaskProcessor, GaussianBlurPipeline, EffectConfig
+- **Effects/** - One file per effect type + EffectRegistry
+- **Overlay/** - OverlayRenderer + SphereManager, WebcamQuadManager, IntrinsicsProjector, LabelManager
+- **Story/** - StoryPlayback, StoryLoader, VideoExporter
 - **Proto/SocialsenseMessages.cs** - Hand-written C# protobuf (not auto-generated)
-- **Shaders/SegmentOverlay.shader** - Per-fragment pinhole projection using camera intrinsics, stereo support, edge fade
+- **Shaders/SegmentOverlay.shader** - Per-fragment pinhole projection using camera intrinsics
 
 The Unity project is at `unity-client/`. Open in Unity Editor to modify client-side rendering, shaders, or protobuf messages.
 
@@ -215,14 +301,24 @@ SocialSenseAR/
 │   │   └── personaplex_bridge.py
 │   ├── encoding/rle.py             # RLE encode/decode
 │   └── proto/socialsense_pb2.py    # Generated protobuf
-├── unity-client/Assets/Scripts/
-│   ├── SocialSenseClient.cs        # Camera + WebSocket
-│   ├── OverlayRenderer.cs          # RLE decode + rendering
-│   ├── Proto/SocialsenseMessages.cs # C# protobuf
-│   └── Shaders/SegmentOverlay.shader
+├── unity-client/
+│   ├── Assets/Scripts/
+│   │   ├── SocialSenseClient.cs        # Main coordinator
+│   │   ├── Client/                     # WebSocket, capture, HUD
+│   │   ├── Core/                       # Shared: RLE, masks, blur, effects config
+│   │   ├── Effects/                    # One file per effect type + registry
+│   │   ├── Overlay/                    # OverlayRenderer + sphere/quad/intrinsics/labels
+│   │   ├── Story/                      # StoryPlayback, StoryLoader, VideoExporter
+│   │   ├── Proto/SocialsenseMessages.cs # Hand-written C# protobuf
+│   │   └── Shaders/SegmentOverlay.shader
+│   └── Assets/StreamingAssets/story_dir/ # Demo story files (story.json, masks.bin, video)
 ├── tests/                          # Tests and benchmarks
 ├── scripts/                        # Build scripts (TRT, ONNX)
-├── tools/                          # Client utilities
+├── tools/                          # Client utilities + story pipeline
+│   ├── video_processor.py          # Video → SAM3 masks (story.json + masks.bin)
+│   ├── story_renderer.py           # Render masks + effects onto video
+│   └── story_schema.py             # Story data format, load/save, effect resolver
+├── story/                          # Working directory for video processing
 ├── docs/                           # Technical documentation
 ├── config/                         # SAM3 metadata (TRT shapes)
 ├── personaPlex/                    # PersonaPlex alternative voice backend

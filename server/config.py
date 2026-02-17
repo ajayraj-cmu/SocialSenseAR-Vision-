@@ -13,6 +13,7 @@ CUSTOM_EFFECT_TYPES = (
     "reduce_contrast", "warm_tint", "cool_tint",
     "conversation_mode",  # Inverted mask animation: dims/blurs everything except the active speaker
     "texture",            # Tile a named texture/image over the segmented mask region
+    "logo",               # Custom image overlay — LogoTexture.png in Resources
 )
 
 # Named textures available via Resources.Load — maps alias → Unity resource name
@@ -86,6 +87,12 @@ class ServerConfig:
     )
 
     # Gemini Vision
+    # Toggle vision-based scene understanding on/off.
+    # When False, voice commands skip the Gemini Vision API call (Phase 1) and
+    # fall back to the fast regex parser + text-only Gemini planner instead.
+    # This eliminates the ~1-3s latency added by the vision snapshot call.
+    gemini_vision_enabled: bool = False
+
     gemini_model: str = "gemini-2.5-flash"
     gemini_planning_model: str = "gemini-2.5-flash-lite"  # Fast model for voice command parsing
     gemini_min_interval: float = 6.0    # seconds between scene understanding API calls
@@ -122,10 +129,10 @@ class ServerConfig:
     personaplex_enabled: bool = False  # Off by default; enable to use PersonaPlex instead of faster-whisper
     personaplex_url: str = "ws://localhost:8998/api/chat"  # Override with Modal URL or remote host
     personaplex_voice_prompt: str = "NATF0.pt"
-    personaplex_text_temperature: float = 0.7
-    personaplex_text_topk: int = 25
-    personaplex_audio_temperature: float = 0.8
-    personaplex_audio_topk: int = 250
+    personaplex_text_temperature: float = 0.3  # Low temp = less creative/chatty
+    personaplex_text_topk: int = 10           # Narrow sampling = more predictable
+    personaplex_audio_temperature: float = 0.6  # Slightly lower for less variation
+    personaplex_audio_topk: int = 150         # Narrower audio sampling
 
     # Conversation Mode (inverted mask animation for active speaker focus)
     # When active: person mask is inverted so the dim/blur applies to EVERYTHING EXCEPT the speaker

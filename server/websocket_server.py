@@ -23,6 +23,11 @@ from server.config import ServerConfig
 logger = logging.getLogger(__name__)
 
 
+# Audio response messages use this prefix byte to distinguish from protobuf.
+# Protobuf ServerMessage always starts with field tag 0x08+, so 0x01 is safe.
+AUDIO_RESPONSE_PREFIX = b'\x01'
+
+
 class SocialSenseServer:
     """Main WebSocket server.
 
@@ -93,6 +98,9 @@ class SocialSenseServer:
                 self.pipeline._voice_agent.clear_all_effects()
             logger.info("Cleared all effects, prompts, and voice agent state for new client session")
 
+        # Start audio response sender (PersonaPlex → client)
+        audio_task = asyncio.create_task(self._audio_response_loop(websocket))
+
         try:
             async for raw_message in websocket:
                 await self._handle_message(websocket, raw_message)
@@ -101,6 +109,7 @@ class SocialSenseServer:
         except Exception as e:
             logger.error(f"Client error: {e}", exc_info=True)
         finally:
+            audio_task.cancel()
             self._client = None
             elapsed = time.time() - self._start_time
             logger.info(f"Client session ended: {self._frame_count} frames in {elapsed:.1f}s")
@@ -561,14 +570,53 @@ class SocialSenseServer:
         response.timestamp_ms = time.time() * 1000
         return response.SerializeToString()
 
+    _audio_msg_count = 0
+
     def _process_audio(self, msg: pb.ClientMessage):
         """Feed audio data to the audio pipeline."""
         if self.pipeline is not None and hasattr(self.pipeline, "process_audio"):
+            self._audio_msg_count += 1
+            if self._audio_msg_count == 1:
+                logger.info(f"[Audio] First audio from client: {msg.audio.num_samples} samples, {msg.audio.sample_rate}Hz, {len(msg.audio.pcm16_data)}B")
+            elif self._audio_msg_count % 500 == 0:
+                logger.info(f"[Audio] {self._audio_msg_count} audio messages received from client")
             self.pipeline.process_audio(
                 msg.audio.pcm16_data,
                 msg.audio.sample_rate,
                 msg.audio.num_samples,
             )
+
+    async def _audio_response_loop(self, websocket):
+        """Send PersonaPlex audio responses to client as separate WebSocket messages.
+
+        Audio messages are prefixed with AUDIO_RESPONSE_PREFIX (0x01) to distinguish
+        from protobuf ServerMessage responses (which start with field tag 0x08+).
+        """
+        audio_chunks_sent = 0
+        total_bytes_sent = 0
+        poll_count = 0
+        try:
+            while True:
+                await asyncio.sleep(0.05)  # 50ms = 20 checks/sec
+                poll_count += 1
+                if self.pipeline is None:
+                    continue
+                audio_data = self.pipeline.get_audio_response()
+                if audio_data:
+                    audio_chunks_sent += 1
+                    total_bytes_sent += len(audio_data)
+                    if audio_chunks_sent == 1:
+                        logger.info(f"[Audio] Sending first audio response to client: {len(audio_data)}B")
+                    elif audio_chunks_sent % 100 == 0:
+                        logger.info(f"[Audio] {audio_chunks_sent} chunks sent ({total_bytes_sent}B total)")
+                    try:
+                        await websocket.send(AUDIO_RESPONSE_PREFIX + audio_data)
+                    except Exception:
+                        break  # Connection closed
+                elif poll_count == 200:  # Log once after ~10s if no audio seen
+                    logger.info("[Audio] Response loop running but no audio received after 200 polls")
+        except asyncio.CancelledError:
+            logger.info(f"[Audio] Response loop ended: {audio_chunks_sent} chunks, {total_bytes_sent}B sent")
 
     def _handle_control(self, msg: pb.ClientMessage):
         """Handle control commands from the client via Gemini NLP pipeline."""
