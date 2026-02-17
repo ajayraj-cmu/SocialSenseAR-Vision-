@@ -22,7 +22,7 @@ from typing import Optional
 from dataclasses import dataclass
 import numpy as np
 
-from server.config import EFFECT_TYPES, CUSTOM_EFFECT_TYPES
+from server.config import EFFECT_TYPES, CUSTOM_EFFECT_TYPES, NAMED_TEXTURES
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +236,29 @@ class VoiceCommandPlanner:
     _NOT_TARGETS = {'everything', 'every', 'all', 'anything'}  # incomplete phrases, not real objects
 
     _RE_CLEAR = re.compile(r'^(?:clear|reset|stop|off)$', re.IGNORECASE)
+    # Conversation mode: "conversation mode [on/off]", "focus on speaker", "focus mode", etc.
+    _RE_CONVERSATION_MODE_ON = re.compile(
+        r'^(?:turn\s+on\s+|enable\s+|start\s+|activate\s+)?'
+        r'(?:conversation\s+mode|focus\s+mode|speaker\s+focus|focus\s+on\s+(?:the\s+)?(?:speaker|person|me|us))'
+        r'(?:\s+on)?$', re.IGNORECASE,
+    )
+    _RE_CONVERSATION_MODE_OFF = re.compile(
+        r'^(?:turn\s+off\s+|disable\s+|stop\s+|deactivate\s+|exit\s+)?'
+        r'(?:conversation\s+mode|focus\s+mode|speaker\s+focus)'
+        r'(?:\s+off)?$|^stop\s+conversation\s+mode$', re.IGNORECASE,
+    )
+    # Texture placement: "put/place/show/apply Royal Pattern/Texture on/to/over the wall/floor/etc."
+    # Broad match: captures any "royal <word>" phrase so "royal texture", "royal pattern", etc. all work.
+    # color_hex stores the Unity resource name (e.g. "RoyalPattern") so Unity knows which to load.
+    _TEXTURE_NAMES_PATTERN = '|'.join(re.escape(k) for k in sorted(NAMED_TEXTURES.keys(), key=len, reverse=True))
+    # Also broadly match "royal <anything>" as a texture name
+    _RE_TEXTURE_ON_TARGET = re.compile(
+        rf'^(?:put|place|show|apply|use|add|set|display|project|tile)\s+'
+        rf'(?:the\s+)?'
+        rf'(royal\s+\w+|{_TEXTURE_NAMES_PATTERN})'
+        rf'\s+(?:on|to|onto|over|across|on\s+the|to\s+the|onto\s+the|over\s+the)\s+(?:the\s+)?(.+)$',
+        re.IGNORECASE,
+    )
     _RE_EFFECT_INVERT = re.compile(
         rf'^({_ALL_EFFECTS})\s+(?:every\s*thing|everything|all)\s+(?:but|except|nothing\s+but)\s+(.+)$', re.IGNORECASE,
     )
@@ -485,6 +508,40 @@ class VoiceCommandPlanner:
                 action="add", needs_clarification=True,
                 clarification_question=clarification,
                 reasoning="chain-of-thought: ambiguous request, asking for clarification",
+            )
+
+        # Pattern 0a: Texture placement — "put Royal Pattern/Texture on the wall"
+        # Resolves named texture → effect_type="texture", color_hex=<ResourceName>, target=<object>
+        m = self._RE_TEXTURE_ON_TARGET.match(text)
+        if m:
+            texture_alias = m.group(1).lower().strip()
+            target_raw = m.group(2).strip()
+            target = self._extract_target(target_raw)
+            if target is None:
+                target = target_raw  # use raw if extraction fails
+            # Look up exact alias first, then try "royal" prefix → always RoyalPattern
+            resource_name = NAMED_TEXTURES.get(texture_alias)
+            if resource_name is None and texture_alias.startswith("royal"):
+                resource_name = "RoyalPattern"
+            if resource_name is None:
+                resource_name = NAMED_TEXTURES.get(texture_alias.split()[0], "RoyalPattern")
+            return CommandPlan(
+                targets=[target], effect_type="texture",
+                intensity=1.0, action="add", color_hex=resource_name,
+                reasoning=f"fast-path: texture '{resource_name}' on '{target}'",
+            )
+
+        # Pattern 0b: Conversation mode on/off
+        if self._RE_CONVERSATION_MODE_ON.match(text):
+            return CommandPlan(
+                targets=["person"], effect_type="conversation_mode",
+                intensity=0.75, action="add", invert=True,
+                reasoning="fast-path: conversation mode on — dim/blur everything except active speaker",
+            )
+        if self._RE_CONVERSATION_MODE_OFF.match(text):
+            return CommandPlan(
+                targets=[], effect_type="conversation_mode", intensity=0.0,
+                action="remove", reasoning="fast-path: conversation mode off",
             )
 
         # Pattern 1: clear/reset/stop/off
@@ -780,6 +837,8 @@ Full Pipeline Context:
 - Available effect types: {', '.join(EFFECT_TYPES + CUSTOM_EFFECT_TYPES)}
 - Available full-screen filters: dim, warm, cool, night, grayscale, color
 - Pipeline supports: inverted effects (apply to everything EXCEPT target), color overlays with hex colors
+- conversation_mode: Special effect — segments "person" and dims/blurs everything EXCEPT the person (inverted mask, spotlight effect for focused conversation). Use with targets=["person"], invert=true.
+- texture: Projects a named image/texture onto the segmented mask region. Set color_hex to the resource name (e.g. "RoyalPattern"). Triggered by commands like "put Royal Pattern on the wall".
 - Previous user command: "{last_command}"
 - Was waiting for clarification: {pending_clarification}
 

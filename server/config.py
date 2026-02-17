@@ -11,7 +11,22 @@ CUSTOM_EFFECT_TYPES = (
     "frosted_glass", "redact", "grayscale", "spotlight",
     "noise", "desaturate", "vignette", "soft_glow",
     "reduce_contrast", "warm_tint", "cool_tint",
+    "conversation_mode",  # Inverted mask animation: dims/blurs everything except the active speaker
+    "texture",            # Tile a named texture/image over the segmented mask region
 )
+
+# Named textures available via Resources.Load — maps alias → Unity resource name
+# "Put Royal Pattern on the wall" → effect_type="texture", color_hex="RoyalPattern"
+# "Put Royal Texture on the wall" → same result
+NAMED_TEXTURES = {
+    "royal pattern": "RoyalPattern",
+    "royal texture": "RoyalPattern",
+    "royal":         "RoyalPattern",
+    "pattern":       "RoyalPattern",
+    "royalpattern":  "RoyalPattern",
+    "img 2301":      "RoyalPattern",
+    "img2301":       "RoyalPattern",
+}
 
 
 @dataclass
@@ -111,6 +126,15 @@ class ServerConfig:
     personaplex_text_topk: int = 25
     personaplex_audio_temperature: float = 0.8
     personaplex_audio_topk: int = 250
+
+    # Conversation Mode (inverted mask animation for active speaker focus)
+    # When active: person mask is inverted so the dim/blur applies to EVERYTHING EXCEPT the speaker
+    # This creates a "spotlight" effect: background dims, speaker stays clear
+    conversation_mode_enabled: bool = False            # Runtime toggle; also set by voice command
+    conversation_mode_effect: str = "dim"              # Effect applied to non-speaker region: "dim" or "blur"
+    conversation_mode_intensity: float = 0.75          # Effect intensity (0.0-1.0)
+    conversation_mode_transition_frames: int = 15      # Animation frames for smooth enter/exit
+    conversation_mode_target_label: str = "person"     # SAM3 prompt to segment the active speaker
 
     # Debug
     debug_view: bool = False  # Show Quest camera feed + overlays in cv2 window
