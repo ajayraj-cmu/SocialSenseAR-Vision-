@@ -1,0 +1,39 @@
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+
+# IDE
+*.csproj
+*.sln
+.vsconfig
+.vs/
+.idea/
+
+# Builds
+*.apk
+*.aab
+*.unitypackage
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Burst debug
+*_BurstDebugInformation_DoNotShip/
+
+# XR Editor settings (regenerated per-user)
+Assets/XR/Settings/OpenXR Editor Settings.asset
+Assets/XR/UserSimulationSettings/
+Assets/CompositionLayers/UserSettings/
+/.utmp
+/.vscode
+SocialSenseAR-Unity.slnx
+*.blob
+/demo_frames

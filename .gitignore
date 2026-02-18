@@ -90,3 +90,21 @@ Thumbs.db
 !.env.example
 /calibration_frames
 /archive/
+
+# Video pipeline
+video_pipeline/output/
+video_pipeline/videos/
+video_pipeline/overlay_images/
+
+# Unity (unitySetUp) - generated/cache
+unitySetUp/SocialSenseAR-Unity/Library/
+unitySetUp/SocialSenseAR-Unity/Temp/
+unitySetUp/SocialSenseAR-Unity/Logs/
+unitySetUp/SocialSenseAR-Unity/UserSettings/
+unitySetUp/SocialSenseAR-Unity/Build/
+unitySetUp/SocialSenseAR-Unity/Builds/
+unitySetUp/SocialSenseAR-Unity/Obj/
+unitySetUp/SocialSenseAR-Unity/MemoryCaptures/
+unitySetUp/SocialSenseAR-Unity/*.csproj
+unitySetUp/SocialSenseAR-Unity/*.sln
+unitySetUp/SocialSenseAR-Unity/*.slnx

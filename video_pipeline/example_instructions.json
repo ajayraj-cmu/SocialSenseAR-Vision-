@@ -1,0 +1,172 @@
+{
+  "_comment": "Example JSON instructions file for the JSON-Driven SAM3 Video Pipeline.",
+  "_comment2": "Every event needs either 'timestamp_s' (seconds) OR 'frame_idx' (frame number).",
+  "_comment3": "Events are processed in order. SAM3 segments based on 'segment_target' events.",
+
+  "events": [
+
+    {
+      "_comment": "=== SEGMENT_TARGET ===",
+      "_comment2": "Tell SAM3 what to look for and track. Use this at any point in the video.",
+      "type": "segment_target",
+      "timestamp_s": 0.0,
+      "targets": ["wall", "person"]
+    },
+
+    {
+      "_comment": "=== OVERLAY_IMAGE ===",
+      "_comment2": "Tile an image from overlay_images/ folder over a segmented mask.",
+      "_comment3": "image_name: filename in overlay_images/ (with or without extension).",
+      "_comment4": "subject: what SAM3 labeled the mask (must match a segment_target above).",
+      "_comment5": "opacity: 0.0 (transparent) to 1.0 (fully opaque). Default: 1.0.",
+      "_comment6": "invert: true = apply image to EVERYTHING EXCEPT the mask. Default: false.",
+      "type": "overlay_image",
+      "timestamp_s": 2.0,
+      "subject": "wall",
+      "image_name": "RoyalPattern",
+      "opacity": 0.85,
+      "invert": false,
+      "end_timestamp_s": 8.0
+    },
+
+    {
+      "_comment": "Example: tile an image over the BACKGROUND (invert the person mask)",
+      "type": "overlay_image",
+      "timestamp_s": 10.0,
+      "subject": "person",
+      "image_name": "RoyalPattern",
+      "opacity": 0.7,
+      "invert": true,
+      "end_timestamp_s": 16.0
+    },
+
+    {
+      "_comment": "=== EFFECT ===",
+      "_comment2": "Apply a standard SAM3 effect to a segmented mask.",
+      "_comment3": "effect values: blur, dim, highlight, color, grayscale, pixelate, frosted_glass, redact, outline",
+      "_comment4": "intensity: 0.0–1.0 (default 1.0).",
+      "_comment5": "invert: apply to everything EXCEPT the mask.",
+      "_comment6": "color_hex: only used when effect is 'color'.",
+      "type": "effect",
+      "timestamp_s": 5.0,
+      "subject": "person",
+      "effect": "blur",
+      "intensity": 0.8,
+      "invert": false,
+      "end_timestamp_s": 9.0
+    },
+
+    {
+      "_comment": "Example: grayscale the background (invert person mask)",
+      "type": "effect",
+      "timestamp_s": 12.0,
+      "subject": "person",
+      "effect": "grayscale",
+      "intensity": 1.0,
+      "invert": true,
+      "end_timestamp_s": 18.0
+    },
+
+    {
+      "_comment": "Example: color tint on a specific object",
+      "type": "effect",
+      "timestamp_s": 20.0,
+      "subject": "wall",
+      "effect": "color",
+      "color_hex": "#FF6B6B",
+      "intensity": 0.6,
+      "invert": false,
+      "end_timestamp_s": 25.0
+    },
+
+    {
+      "_comment": "=== CONVERSATION_MODE ===",
+      "_comment2": "Trigger the conversation mode AR animation.",
+      "_comment3": "Finds the nearest/largest detected person, keeps them in full color.",
+      "_comment4": "Everything else gets a grayscale+blur that sweeps in from the edges.",
+      "_comment5": "animation_duration_s: how long the sweep-in animation takes (default 1.5s).",
+      "_comment6": "blur_intensity: 0.0–1.0, how strong the background blur is (default 1.0).",
+      "_comment7": "subject: usually 'person' — SAM3 must have segmented a person already.",
+      "_comment8": "end_timestamp_s: when to stop the effect (omit to hold until end of video).",
+      "type": "conversation_mode",
+      "timestamp_s": 30.0,
+      "subject": "person",
+      "animation_duration_s": 1.5,
+      "blur_intensity": 0.85,
+      "end_timestamp_s": 45.0
+    },
+
+    {
+      "_comment": "=== SEGMENT_TARGET (mid-video) ===",
+      "_comment2": "You can add new targets at any point in the video. SAM3 will start",
+      "_comment2b": "tracking the new object from this frame onward.",
+      "type": "segment_target",
+      "timestamp_s": 50.0,
+      "targets": ["laptop", "chair"]
+    },
+
+    {
+      "_comment": "Overlay an image on a laptop starting at 52 seconds",
+      "type": "overlay_image",
+      "timestamp_s": 52.0,
+      "subject": "laptop",
+      "image_name": "RoyalPattern",
+      "opacity": 1.0,
+      "invert": false
+    }
+
+  ],
+
+  "_schema_notes": {
+    "event_types": {
+      "segment_target": {
+        "description": "Tell SAM3 what objects to detect and segment.",
+        "required_fields": ["type", "timestamp_s OR frame_idx", "targets"],
+        "targets": "Array of strings — SAM3 text prompts e.g. ['wall', 'person', 'laptop']"
+      },
+      "overlay_image": {
+        "description": "Tile an image from overlay_images/ folder over the segmented mask.",
+        "required_fields": ["type", "timestamp_s OR frame_idx", "subject", "image_name"],
+        "optional_fields": {
+          "opacity": "0.0–1.0 (default 1.0)",
+          "invert": "true = apply to background instead of subject (default false)",
+          "end_timestamp_s": "When to stop (omit = hold for rest of video)",
+          "end_frame_idx": "Alternative: stop at specific frame number"
+        },
+        "image_name": "File in video_pipeline/overlay_images/ (extension optional)"
+      },
+      "effect": {
+        "description": "Apply a standard visual effect to a segmented mask.",
+        "required_fields": ["type", "timestamp_s OR frame_idx", "subject", "effect"],
+        "optional_fields": {
+          "intensity": "0.0–1.0 (default 1.0)",
+          "invert": "true = apply to background (default false)",
+          "color_hex": "#RRGGBB — only used when effect is 'color'",
+          "end_timestamp_s": "When to stop",
+          "end_frame_idx": "Alternative: stop at frame number"
+        },
+        "effect_values": [
+          "blur", "dim", "highlight", "color", "grayscale",
+          "pixelate", "frosted_glass", "redact", "outline"
+        ]
+      },
+      "conversation_mode": {
+        "description": "Inverted mask animation: nearest person stays in full color, surroundings fade to grayscale+blur with a cinematic sweep-in.",
+        "required_fields": ["type", "timestamp_s OR frame_idx", "subject"],
+        "optional_fields": {
+          "animation_duration_s": "Sweep-in duration in seconds (default 1.5)",
+          "blur_intensity": "Background blur strength 0.0–1.0 (default 1.0)",
+          "end_timestamp_s": "When to stop",
+          "end_frame_idx": "Alternative: stop at frame number"
+        },
+        "subject": "Usually 'person' — must match a segment already tracked by SAM3"
+      }
+    },
+    "timing_fields": {
+      "timestamp_s": "Time in seconds (float). Use this OR frame_idx.",
+      "frame_idx": "Frame number (integer). Use this OR timestamp_s.",
+      "end_timestamp_s": "End time in seconds. If omitted, effect runs until end of video.",
+      "end_frame_idx": "End frame number. Alternative to end_timestamp_s."
+    }
+  }
+}
